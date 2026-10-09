@@ -195,9 +195,10 @@ The settings in `corral.conf`, one `key = value` per line:
 | `gpu_warn`, `gpu_unload` | 90%, 95% | The guard's GPU memory limits in GiB |
 | `name` | | Your own HTTPS name for the web UI |
 | `name_address` | `127.0.97.105` | The local address that name points to |
+| `name_listen` | `local` | Who reaches that name: `local` (only this machine), `armed` (other devices too, while Corral is on) or `all` (always) |
 
 > [!IMPORTANT]
-> After changing ports, `listen`, `name`, `models_max`, `router_options` or `helpers.ini`, run `corral install` again, so the systemd units match your settings.
+> After changing ports, `listen`, `name`, `name_listen`, `models_max`, `router_options` or `helpers.ini`, run `corral install` again, so the systemd units match your settings.
 
 ---
 
