@@ -49,22 +49,12 @@ pub fn arm_allowed(origins: &[String], origin: Option<&str>, header: Option<&str
     origin.is_some_and(|origin| origins.iter().any(|allowed| allowed == origin)) && header == Some("arm")
 }
 
-/// `POST /corral/arm`: runs this same program's `corral on` against the user's systemd. The web front runs from a
-/// system unit as the user, so it points at the user's session explicitly.
+/// `POST /corral/arm`: runs this same program's `corral on` in the user's session.
 pub fn arm() -> Result<(), String> {
-    let uid = fs::read_to_string("/proc/self/status")
-        .ok()
-        .and_then(|status| {
-            let line = status.lines().find(|line| line.starts_with("Uid:"))?;
-            line.split_whitespace().nth(1).map(str::to_owned)
-        })
-        .ok_or("can't tell which user this runs as")?;
-    let runtime = format!("/run/user/{uid}");
     let program = std::env::current_exe().map_err(|error| format!("can't find corral itself: {error}"))?;
     let output = std::process::Command::new(program)
         .arg("on")
-        .env("XDG_RUNTIME_DIR", &runtime)
-        .env("DBUS_SESSION_BUS_ADDRESS", format!("unix:path={runtime}/bus"))
+        .envs(super::session::environment()?)
         .output()
         .map_err(|error| format!("couldn't run corral: {error}"))?;
     if output.status.success() {
