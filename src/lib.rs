@@ -2,6 +2,7 @@ pub mod config;
 pub mod guard;
 pub mod helpers;
 pub mod http;
+pub mod install;
 pub mod look;
 pub mod router;
 pub mod status;

@@ -6,6 +6,7 @@ use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::Shell;
 use corral::config::Config;
 use corral::helpers::{self, Helper};
+use corral::install;
 use corral::status::Status;
 use corral::{router, systemd};
 
@@ -42,6 +43,12 @@ enum Command {
     Logs,
     /// Print the completion script for a shell
     Completions { shell: Shell },
+    /// Install or upgrade Corral: this program, its systemd units and starter settings
+    Install {
+        /// Show what would change, and change nothing
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 fn main() -> ExitCode {
@@ -64,7 +71,24 @@ fn main() -> ExitCode {
             clap_complete::generate(shell, &mut Cli::command(), "corral", &mut io::stdout());
             ExitCode::SUCCESS
         }
+        Command::Install { dry_run } => install(dry_run),
     }
+}
+
+fn install(dry_run: bool) -> ExitCode {
+    let mut completion = Vec::new();
+    clap_complete::generate(Shell::Bash, &mut Cli::command(), "corral", &mut completion);
+    let plan = install::plan(&install::Places::of_this_user(), completion);
+    print!("{}", install::describe(&plan));
+    if !plan.blockers.is_empty() {
+        return ExitCode::FAILURE;
+    }
+    if dry_run {
+        println!("Nothing was changed (--dry-run).");
+        return ExitCode::SUCCESS;
+    }
+    eprintln!("corral install: only --dry-run works so far");
+    ExitCode::FAILURE
 }
 
 fn on(config: &Config, with: &[String], without: &[String]) -> ExitCode {
