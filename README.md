@@ -160,7 +160,7 @@ Every request passes one gate, `corral web`, which decides who may do what befor
 | `corral install`, `--dry-run` | Install or upgrade; with `--dry-run`, only show what would change |
 | `corral uninstall`, `--purge` | Remove Corral; with `--purge`, your settings and backups too |
 | `corral key add <device>`, `--allow tools` | Make an API key for another device, shown once; `--allow tools` also lets it use the router's tools |
-| `corral key list`, `corral key revoke <device>` | List the devices with keys; end one, effective on its next request |
+| `corral key list`, `rename <device> <new-name>`, `revoke <device>` | List the devices with keys, rename one (its key stays), or end one, effective on its next request |
 | `corral completions <shell>` | Print the completion script for bash, zsh, fish, elvish or PowerShell |
 | `corral help`, `-h`, `--help` | The same list, from the command line |
 
