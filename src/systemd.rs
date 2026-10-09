@@ -8,12 +8,12 @@ pub const ROUTER: &str = "corral-router.service";
 pub const GUARD: &str = "corral-guard.service";
 
 /// Starts units and waits until systemd has done so. On failure, systemd's own message.
-pub fn start(units: &[&str]) -> Result<(), String> {
+pub fn start(units: &[impl AsRef<str>]) -> Result<(), String> {
     systemctl("start", units)
 }
 
 /// Stops units and waits until their processes are gone. On failure, systemd's own message.
-pub fn stop(units: &[&str]) -> Result<(), String> {
+pub fn stop(units: &[impl AsRef<str>]) -> Result<(), String> {
     systemctl("stop", units)
 }
 
@@ -32,10 +32,10 @@ pub fn corral_units() -> Vec<String> {
         .unwrap_or_default()
 }
 
-fn systemctl(verb: &str, units: &[&str]) -> Result<(), String> {
+fn systemctl(verb: &str, units: &[impl AsRef<str>]) -> Result<(), String> {
     let output = Command::new("systemctl")
         .args(["--user", verb])
-        .args(units)
+        .args(units.iter().map(AsRef::as_ref))
         .output()
         .map_err(|error| format!("couldn't run systemctl: {error}"))?;
     if output.status.success() {

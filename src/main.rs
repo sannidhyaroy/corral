@@ -5,8 +5,9 @@ use std::process::ExitCode;
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::Shell;
 use corral::config::Config;
+use corral::helpers::{self, Helper};
 use corral::status::Status;
-use corral::systemd;
+use corral::{router, systemd};
 
 /// Herd and serve your llama.cpp models, on demand and behind one gate.
 #[derive(Parser)]
@@ -19,7 +20,14 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// Arm: open the gate; servers start on their first request and stop after idle
-    On,
+    On {
+        /// Also arm these helpers this time (comma-separated)
+        #[arg(long, value_delimiter = ',', value_name = "HELPERS")]
+        with: Vec<String>,
+        /// Leave these helpers out this time (comma-separated)
+        #[arg(long, value_delimiter = ',', value_name = "HELPERS")]
+        without: Vec<String>,
+    },
     /// Disarm: close the gate and stop anything running
     Off,
     /// Armed or not, what is running, which model is loaded, GPU memory (default)
@@ -45,7 +53,7 @@ fn main() -> ExitCode {
 
     let cli = Cli::parse();
     match cli.command.unwrap_or(Command::Status { json: false }) {
-        Command::On => on(&Config::load()),
+        Command::On { with, without } => on(&Config::load(), &with, &without),
         Command::Off => off(),
         Command::Status { json } => status(json),
         Command::Logs => logs(),
@@ -56,15 +64,72 @@ fn main() -> ExitCode {
     }
 }
 
-fn on(config: &Config) -> ExitCode {
-    if let Err(error) = systemd::start(&[systemd::TARGET]) {
+fn on(config: &Config, with: &[String], without: &[String]) -> ExitCode {
+    let (helpers, problems) = helpers::load();
+    for problem in &problems {
+        eprintln!("corral: helpers.ini {problem}");
+    }
+    let chosen = match helpers::choose(&helpers, with, without) {
+        Ok(chosen) => chosen,
+        Err(error) => {
+            eprintln!("corral: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    // A loaded preset that needs the whole GPU keeps yielding helpers out
+    let exclusive = config.list("exclusive");
+    let blocker = router::active_models(config.router_port())
+        .unwrap_or_default()
+        .into_iter()
+        .find(|model| exclusive.contains(&model.id));
+    let (armed, held_back): (Vec<&Helper>, Vec<&Helper>) = chosen
+        .into_iter()
+        .partition(|helper| blocker.is_none() || !helper.yields);
+
+    // Arming states the whole setup, so helpers not chosen this time are closed
+    let installed = systemd::corral_units();
+    let is_installed = |unit: &String| installed.contains(unit);
+    let mut start = vec![systemd::TARGET.to_owned()];
+    start.extend(armed.iter().map(|helper| helper.socket_unit()).filter(is_installed));
+    let stop: Vec<String> = helpers
+        .iter()
+        .filter(|helper| !armed.iter().any(|a| a.name == helper.name))
+        .flat_map(|helper| [helper.socket_unit(), helper.service_unit()])
+        .filter(is_installed)
+        .collect();
+    if let Err(error) = systemd::start(&start) {
         eprintln!("corral: couldn't arm: {error}");
         return ExitCode::FAILURE;
     }
+    if !stop.is_empty()
+        && let Err(error) = systemd::stop(&stop)
+    {
+        eprintln!("corral: couldn't close a helper: {error}");
+    }
+
     let gate = format!("http://ai.localhost:{}", config.gate_port());
     println!("Corral armed. Models start on their first request and stop after idle.");
     println!("  Web UI:  {gate}");
     println!("  API:     {gate}/v1");
+    for helper in &helpers {
+        let line = if armed.iter().any(|a| a.name == helper.name) {
+            if is_installed(&helper.socket_unit()) {
+                format!("http://{}.localhost:{}/v1", helper.name, helper.port)
+            } else {
+                format!("no units yet ({} is missing)", helper.socket_unit())
+            }
+        } else if held_back.iter().any(|h| h.name == helper.name) {
+            let model = blocker.as_ref().map_or("a preset", |model| model.name());
+            format!(
+                "held back: {model} needs the whole GPU (corral on --with {} once it's unloaded)",
+                helper.name
+            )
+        } else {
+            format!("not armed (corral on --with {})", helper.name)
+        };
+        println!("  {:<8} {line}", format!("{}:", helper.name));
+    }
     ExitCode::SUCCESS
 }
 
@@ -76,7 +141,6 @@ fn off() -> ExitCode {
         eprintln!("corral: no Corral units are installed");
         return ExitCode::FAILURE;
     }
-    let units: Vec<&str> = units.iter().map(String::as_str).collect();
     if let Err(error) = systemd::stop(&units) {
         eprintln!("corral: couldn't disarm: {error}");
         return ExitCode::FAILURE;

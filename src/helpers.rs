@@ -71,6 +71,22 @@ impl Helper {
     }
 }
 
+/// The helpers `corral on` arms: those marked `armed`, plus `with`, minus `without`. Names that aren't helpers are
+/// an error, so a typo doesn't silently arm less than intended.
+pub fn choose<'a>(helpers: &'a [Helper], with: &[String], without: &[String]) -> Result<Vec<&'a Helper>, String> {
+    if let Some(unknown) = with
+        .iter()
+        .chain(without)
+        .find(|name| !helpers.iter().any(|h| &h.name == *name))
+    {
+        return Err(format!("there is no helper named `{unknown}` in helpers.ini"));
+    }
+    Ok(helpers
+        .iter()
+        .filter(|helper| (helper.armed || with.contains(&helper.name)) && !without.contains(&helper.name))
+        .collect())
+}
+
 /// The helpers in `helpers.ini`, plus a message for each section that couldn't be used.
 pub fn load() -> (Vec<Helper>, Vec<String>) {
     fs::read_to_string(config_dir().join("helpers.ini")).map_or_else(|_| (Vec::new(), Vec::new()), |text| parse(&text))
@@ -245,5 +261,23 @@ model = ~/Models/ggml-large-v3-turbo.bin
         assert!(problems[0].contains("lowercase"));
         assert!(problems[1].contains("unknown type `sd`"));
         assert!(problems[2].contains("needs a `command`"));
+    }
+
+    #[test]
+    fn choosing_what_corral_on_arms() {
+        let (helpers, _) = parse(
+            "[a]\nport = 1\ntype = custom\ncommand = a\narmed = yes\n[b]\nport = 2\ntype = custom\ncommand = b\n",
+        );
+        let names = |chosen: Vec<&Helper>| chosen.iter().map(|h| h.name.clone()).collect::<Vec<_>>();
+        assert_eq!(names(choose(&helpers, &[], &[]).unwrap()), ["a"]);
+        assert_eq!(
+            names(choose(&helpers, &["b".to_owned()], &["a".to_owned()]).unwrap()),
+            ["b"]
+        );
+        assert!(
+            choose(&helpers, &["c".to_owned()], &[])
+                .unwrap_err()
+                .contains("no helper named `c`")
+        );
     }
 }
