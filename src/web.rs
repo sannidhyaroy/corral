@@ -60,7 +60,10 @@ const OFF_ERROR: &str = r#"{"error":{"code":503,"type":"unavailable_error","mess
 /// - The app builds its tab title as "<chat> - llama-ui" inside its script bundle and puts the name in a <meta> for
 ///   home-screen installs. Rather than rewrite the 8 MB bundle, a watcher swaps the name wherever it appears.
 /// - Service worker registration is turned off, so the browser never caches the app behind the server's back.
-const HEAD_FIX: &str = r#"<title>Corral</title><script>(()=>{if(navigator.serviceWorker)navigator.serviceWorker.register=()=>Promise.reject(new Error("Corral runs without a service worker"));const fix=()=>{const t=document.title,n=t.replace(/llama-ui$/,"Corral");if(n!==t)document.title=n;for(const m of document.head.querySelectorAll('meta[content="llama-ui"]'))m.content="Corral"};new MutationObserver(fix).observe(document.head,{subtree:true,childList:true,characterData:true,attributes:true,attributeFilter:["content"]});fix()})()</script>"#;
+/// - On a browser's first visit, the router's built-in tools start unchecked: they act on this machine, so using them
+///   should be a choice. The app keeps that list in `LlamaUi.disabledToolKeys`, set only when the browser has none, so
+///   its own choices win afterwards.
+const HEAD_FIX: &str = r#"<title>Corral</title><script>(()=>{try{const k="LlamaUi.disabledToolKeys";if(localStorage.getItem(k)===null)localStorage.setItem(k,JSON.stringify(["read_file","file_glob_search","grep_search","get_datetime","write_file","edit_file","exec_shell_command"].map(t=>"builtin:"+t)))}catch(e){}if(navigator.serviceWorker)navigator.serviceWorker.register=()=>Promise.reject(new Error("Corral runs without a service worker"));const fix=()=>{const t=document.title,n=t.replace(/llama-ui$/,"Corral");if(n!==t)document.title=n;for(const m of document.head.querySelectorAll('meta[content="llama-ui"]'))m.content="Corral"};new MutationObserver(fix).observe(document.head,{subtree:true,childList:true,characterData:true,attributes:true,attributeFilter:["content"]});fix()})()</script>"#;
 
 type Body = BoxBody<Bytes, hyper::Error>;
 
