@@ -20,6 +20,7 @@
 - [Usage](#usage)
 - [Configuration](#configuration)
 - [Helpers](#helpers)
+- [Thinking](#thinking)
 - [Security](#security)
 - [Limitations](#limitations)
 - [FAQ](#faq)
@@ -56,7 +57,7 @@
 ### Presets
 - [x] Every model and its settings as a named preset in one `models.ini` (context size, speculative decoding, sampling, thinking on or off)
 - [ ] **Corral · Auto**: a virtual model that answers with whatever is loaded, for side jobs like chat titles
-- [ ] Thinking controls that mean the same thing on every model
+- [x] [Thinking controls](#thinking) that mean the same thing on every model: apps send the standard `reasoning_effort`, and Corral turns it into what each model understands
 
 ### Helpers
 - [x] Small models beside the router, each in its own server, for jobs that can't wait for a model swap (edit predictions, dictation, embeddings)
@@ -157,6 +158,7 @@ Every request passes one gate, `corral web`, which decides who may do what befor
 | `corral status`, `corral st`, or just `corral` | Armed or not, what is loaded, helpers, GPU memory, RAM, temperatures and power |
 | `corral status --json` | The same, for scripts and status bars |
 | `corral logs`, `corral lg` | Follow the logs of every Corral unit |
+| `corral models` | List the presets, their names in apps, and how each one thinks |
 | `corral install`, `--dry-run` | Install or upgrade; with `--dry-run`, only show what would change |
 | `corral uninstall`, `--purge` | Remove Corral; with `--purge`, your settings and backups too |
 | `corral key add <device>`, `--allow tools` | Make an API key for another device, shown once; `--allow tools` also lets it use the router's tools |
@@ -196,6 +198,7 @@ The settings in `corral.conf`, one `key = value` per line:
 | `name` | | Your own HTTPS name for the web UI |
 | `name_address` | `127.0.97.105` | The local address that name points to |
 | `name_listen` | `local` | Who reaches that name: `local` (only this machine), `armed` (other devices too, while Corral is on) or `all` (always) |
+| `thinking.<preset>` | from the model | How a preset thinks, for models whose template doesn't say: `switch`, `levels`, `always` or `none` (see [Thinking](#thinking)) |
 
 > [!IMPORTANT]
 > After changing ports, `listen`, `name`, `name_listen`, `models_max`, `router_options` or `helpers.ini`, run `corral install` again, so the systemd units match your settings.
@@ -227,6 +230,27 @@ port = 8082
 | `armed` | `yes`: plain `corral on` includes it |
 | `yields` | `yes` (default): steps aside for presets that need the whole GPU, and goes first when GPU memory runs short |
 | `claims` | `gpu`: the router's model is unloaded when this helper starts |
+
+---
+
+## Thinking
+
+Apps ask for thinking with the standard `reasoning_effort` (`none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`), which llama.cpp mostly ignores, while every model family has its own control. Corral reads each preset's chat template straight from its GGUF file, without loading the model, and rewrites the request into what that model understands:
+
+| The model has | `none` | Any other effort |
+|---|---|---|
+| An on/off switch | Thinking switched off | Thinking switched on |
+| Effort levels | Thinking budget of 0 tokens | Its own level: `minimal` → low, `low`, `medium` and `high` as they are, `xhigh` and `max` → high |
+| Thinking always | Thinking budget of 0 tokens | Unchanged |
+| No thinking | The field is dropped | The field is dropped |
+
+A model's own controls always win: a token budget only stands in for "off" when a model has no switch, never for a level. Requests that already set the model's own fields (`chat_template_kwargs`, `thinking_budget_tokens`), like the web UI's, pass through untouched, and only chat completions are rewritten. Each rewrite shows up in `corral logs`.
+
+`corral models` shows what Corral found for each preset. If a template hides its controls, tell Corral in `corral.conf`, using the preset's name from `models.ini`:
+
+```ini
+thinking.my-model = levels
+```
 
 ---
 
