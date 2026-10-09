@@ -3,7 +3,6 @@
 use std::process::Command;
 
 pub const TARGET: &str = "corral.target";
-pub const ROUTER_SOCKET: &str = "corral-router.socket";
 pub const ROUTER: &str = "corral-router.service";
 pub const GUARD: &str = "corral-guard.service";
 

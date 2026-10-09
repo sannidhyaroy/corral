@@ -205,8 +205,11 @@ fn on(config: &Config, with: &[String], without: &[String]) -> ExitCode {
 
 fn off() -> ExitCode {
     // Every unit by name, so systemctl waits until each one's processes are gone; stopping only the target can
-    // return while a large model is still exiting
-    let units = systemd::corral_units();
+    // return while a large model is still exiting. The web front stays, so the gate answers "off" instead of refusing.
+    let units: Vec<String> = systemd::corral_units()
+        .into_iter()
+        .filter(|unit| !unit.starts_with("corral-web."))
+        .collect();
     if units.is_empty() {
         eprintln!("corral: no Corral units are installed");
         return ExitCode::FAILURE;

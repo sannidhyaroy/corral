@@ -108,14 +108,14 @@ pub struct Status {
 
 impl Status {
     pub fn gather(config: &Config) -> Self {
-        let units = [systemd::TARGET, systemd::ROUTER_SOCKET, systemd::ROUTER, systemd::GUARD];
-        let [armed, socket, running, guard_running] = systemd::active(&units)[..] else {
+        let units = [systemd::TARGET, systemd::ROUTER, systemd::GUARD];
+        let [armed, running, guard_running] = systemd::active(&units)[..] else {
             unreachable!("systemd::active returns one state per unit")
         };
         let router = if running {
             // The router's own port: asking through the gate would start a stopped router
             router::active_models(config.router_port()).map_or(Router::Starting, Router::Running)
-        } else if socket {
+        } else if armed {
             Router::Waiting
         } else {
             Router::Off
