@@ -459,7 +459,8 @@ fn usage(usage: Usage) -> String {
 
 /// `used / total GiB`, right-aligned so numbers line up under each other.
 fn amount(usage: Usage) -> String {
-    format!("{:>4} / {} GiB", gib(usage.used), gib(usage.total))
+    let percent = (usage.used * 100).checked_div(usage.total).unwrap_or(0);
+    format!("{:>4} / {} GiB  {percent:>2}%", gib(usage.used), gib(usage.total))
 }
 
 #[allow(clippy::cast_precision_loss)] // memory sizes are far below f64's exact range
