@@ -52,10 +52,14 @@ pub struct Action {
 
 pub struct Plan {
     pub actions: Vec<Action>,
+    /// Whole folders removed at the end (only when purging).
+    pub folders: Vec<PathBuf>,
     /// Problems that stop the install, such as a missing llama-server.
     pub blockers: Vec<String>,
     /// Things worth knowing that don't stop it.
     pub notes: Vec<String>,
+    /// What's left for the user to do by hand, said again at the end.
+    pub afterwards: Vec<String>,
 }
 
 /// The folders Corral installs into.
@@ -227,8 +231,10 @@ pub fn plan(places: &Places, completion: Vec<u8>) -> Plan {
     actions.extend(name_actions(&context, places, &mut notes));
     Plan {
         actions,
+        folders: Vec::new(),
         blockers,
         notes,
+        afterwards: Vec::new(),
     }
 }
 
@@ -249,19 +255,29 @@ fn name_actions(context: &Context, places: &Places, notes: &mut Vec<String>) -> 
         })
         .collect();
 
-    let line = format!("{} {name}", context.config.name_address());
-    let hosts = fs::read_to_string(&places.hosts).unwrap_or_default();
-    let has_line = hosts.lines().any(|existing| {
-        let without_comment = existing.split('#').next().unwrap_or_default();
-        without_comment.split_whitespace().eq(line.split_whitespace())
-    });
-    if !has_line {
-        let mut updated = hosts;
-        if !updated.is_empty() && !updated.ends_with('\n') {
-            updated.push('\n');
+    let entry = format!("{} {name}", context.config.name_address());
+    match fs::read_to_string(&places.hosts) {
+        Ok(hosts) => {
+            if let Some(updated) = hosts_with(&hosts, &entry) {
+                notes.push(format!("adds this line to {}: {entry}", places.hosts.display()));
+                actions.push(action(places.hosts.clone(), updated.into_bytes(), false, true));
+            }
+            // Corral never removes lines from the hosts file; an entry for an earlier name is pointed out instead
+            for stale in corral_hosts_lines(&hosts, None)
+                .iter()
+                .filter(|line| !is_entry(line, &entry))
+            {
+                notes.push(format!(
+                    "{} still has an entry Corral added for an earlier name; remove it if you no longer need it: {stale}",
+                    places.hosts.display()
+                ));
+            }
         }
-        let _ = writeln!(updated, "{line} # Corral");
-        actions.push(action(places.hosts.clone(), updated.into_bytes(), false, true));
+        // Never write a hosts file Corral couldn't read: it would replace everything in it
+        Err(error) => notes.push(format!(
+            "{} couldn't be read ({error}), so it's left alone; add `{entry}` to it by hand",
+            places.hosts.display()
+        )),
     }
 
     let tls = places.config.join("tls");
@@ -296,7 +312,7 @@ pub fn describe(plan: &Plan) -> String {
     for (change, heading) in [
         (Change::Create, "Create"),
         (Change::Replace, "Replace (the current file is backed up first)"),
-        (Change::Remove, "Remove (backed up first)"),
+        (Change::Remove, "Remove (backed up first, except with --purge)"),
         (Change::Keep, "Already up to date"),
     ] {
         let paths: Vec<&Action> = plan.actions.iter().filter(|action| action.change == change).collect();
@@ -309,6 +325,12 @@ pub fn describe(plan: &Plan) -> String {
             let _ = writeln!(out, "  {}{sudo}", action.path.display());
         }
     }
+    if !plan.folders.is_empty() {
+        let _ = writeln!(out, "Remove with everything in them (not backed up):");
+        for folder in &plan.folders {
+            let _ = writeln!(out, "  {}/", folder.display());
+        }
+    }
     for note in &plan.notes {
         let _ = writeln!(out, "Note: {note}");
     }
@@ -318,36 +340,168 @@ pub fn describe(plan: &Plan) -> String {
     out
 }
 
-/// Carries out a plan: backs up every file it replaces or removes, writes the user's files atomically, and hands
-/// system files to `sudo`. Returns where the backups went, if any were made.
-pub fn apply(plan: &Plan, places: &Places) -> Result<Option<PathBuf>, String> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Purpose {
+    Install,
+    Uninstall,
+    /// Uninstall, settings and backups included; nothing is backed up.
+    Purge,
+}
+
+/// Carries out a plan: backs up every file it replaces or removes (except when purging), writes the user's files
+/// atomically, and hands system files to `sudo`. Returns where the backups went, if any were made.
+pub fn apply(plan: &Plan, places: &Places, purpose: Purpose) -> Result<Option<PathBuf>, String> {
     let backups = places.data.join("backups").join(timestamp());
     let mut backed_up = false;
-    for action in &plan.actions {
-        if matches!(action.change, Change::Replace | Change::Remove) {
-            back_up(&action.path, &backups)?;
-            backed_up = true;
+    if purpose != Purpose::Purge {
+        for action in &plan.actions {
+            if matches!(action.change, Change::Replace | Change::Remove) {
+                back_up(&action.path, &backups)?;
+                backed_up = true;
+            }
         }
     }
 
-    let mut system_changed = false;
+    let system_changes = plan
+        .actions
+        .iter()
+        .any(|action| action.system && action.change != Change::Keep);
+    if system_changes && purpose != Purpose::Install {
+        run(
+            &[
+                "systemctl",
+                "disable",
+                "--now",
+                "corral-web.socket",
+                "corral-web.service",
+            ],
+            true,
+        )?;
+    }
     for action in plan.actions.iter().filter(|action| action.change != Change::Keep) {
         if action.system {
             apply_system(action)?;
-            system_changed = true;
         } else {
             apply_user(action)?;
         }
     }
+    for folder in &plan.folders {
+        fs::remove_dir_all(folder).map_err(|error| format!("couldn't remove {}: {error}", folder.display()))?;
+    }
 
     run(&["systemctl", "--user", "daemon-reload"], false)?;
-    if system_changed {
+    if system_changes {
         run(&["systemctl", "daemon-reload"], true)?;
-        run(&["systemctl", "enable", "--now", "corral-web.socket"], true)?;
-        // A web front still running from before picks up its new program on the next visit
-        run(&["systemctl", "try-restart", "corral-web.service"], true)?;
+        if purpose == Purpose::Install {
+            run(&["systemctl", "enable", "--now", "corral-web.socket"], true)?;
+            // A web front still running from before picks up its new program on the next visit
+            run(&["systemctl", "try-restart", "corral-web.service"], true)?;
+        }
     }
     Ok(backed_up.then_some(backups))
+}
+
+/// Works out what `corral uninstall` removes: everything Corral installed, and with `purge` the settings folder and
+/// Corral's data folder (backups included). Model files are never Corral's to remove.
+pub fn plan_uninstall(places: &Places, purge: bool) -> Plan {
+    let mut actions: Vec<Action> = Vec::new();
+    let mut user_files = vec![places.bin.join("corral"), places.completions.join("corral")];
+    user_files.extend(LEGACY_BINARIES.iter().map(|legacy| places.bin.join(legacy)));
+    user_files.extend(
+        installed_units(&places.units)
+            .into_iter()
+            .map(|unit| places.units.join(unit)),
+    );
+    actions.extend(
+        user_files
+            .into_iter()
+            .filter(|path| path.exists())
+            .map(|path| removal(path, false)),
+    );
+
+    for unit in ["corral-web.socket", "corral-web.service"] {
+        let path = places.system_units.join(unit);
+        if path.exists() {
+            actions.push(removal(path, true));
+        }
+    }
+    // Corral never removes lines from the hosts file: it points out its own and leaves the edit to the user
+    let config = Config::load();
+    let entry = config.name().map(|name| format!("{} {name}", config.name_address()));
+    let hosts = fs::read_to_string(&places.hosts).unwrap_or_default();
+    let mut afterwards: Vec<String> = corral_hosts_lines(&hosts, entry.as_deref())
+        .into_iter()
+        .map(|line| {
+            format!(
+                "remove Corral's line from {} if you no longer need it: {line}",
+                places.hosts.display()
+            )
+        })
+        .collect();
+    if !purge {
+        for (folder, holds) in [
+            (&places.config, "your settings and certificate"),
+            (&places.data, "backups"),
+        ] {
+            if folder.exists() {
+                afterwards.push(format!(
+                    "{}/ is kept ({holds}); `corral uninstall --purge` removes it",
+                    folder.display()
+                ));
+            }
+        }
+    }
+
+    let folders = if purge {
+        [&places.config, &places.data]
+            .into_iter()
+            .filter(|folder| folder.exists())
+            .cloned()
+            .collect()
+    } else {
+        Vec::new()
+    };
+    Plan {
+        actions,
+        folders,
+        blockers: Vec::new(),
+        notes: Vec::new(),
+        afterwards,
+    }
+}
+
+/// `hosts` with Corral's entry appended after everything already there, or `None` if the entry is already present.
+pub fn hosts_with(hosts: &str, entry: &str) -> Option<String> {
+    if hosts.lines().any(|line| is_entry(line, entry)) {
+        return None;
+    }
+    let mut updated = hosts.to_owned();
+    if !updated.is_empty() && !updated.ends_with('\n') {
+        updated.push('\n');
+    }
+    let _ = writeln!(updated, "{entry} # Corral");
+    debug_assert!(updated.starts_with(hosts));
+    Some(updated)
+}
+
+/// Whether a hosts line's entry (the part before any `#`) is `entry`, word for word.
+fn is_entry(line: &str, entry: &str) -> bool {
+    let before_comment = line.split('#').next().unwrap_or_default();
+    before_comment.split_whitespace().eq(entry.split_whitespace())
+}
+
+/// The hosts lines Corral recognises as its own: entries marked with exactly `# Corral` (as `corral install` writes
+/// them), or the entry for the configured name. Comments alone never count.
+pub fn corral_hosts_lines(hosts: &str, entry: Option<&str>) -> Vec<String> {
+    hosts
+        .lines()
+        .filter(|line| {
+            let (before, comment) = line.split_once('#').unwrap_or((line, ""));
+            !before.trim().is_empty()
+                && (comment.trim() == "Corral" || entry.is_some_and(|entry| is_entry(line, entry)))
+        })
+        .map(str::to_owned)
+        .collect()
 }
 
 /// Copies a file into the backup folder under its full path.
@@ -382,7 +536,9 @@ fn apply_user(action: &Action) -> Result<(), String> {
     fs::rename(&temporary, path).map_err(|error| format!("couldn't replace {}: {error}", path.display()))
 }
 
-/// Writes a system file through `sudo install`, which sets owner and mode in the same step.
+/// Writes a system file through `sudo`. An existing file is overwritten in place with `cp`, which keeps its owner,
+/// permissions and security labels (a replacement `/etc/hosts` would lose the label some systems give it); a new file is
+/// created with `install`, owned by root.
 fn apply_system(action: &Action) -> Result<(), String> {
     let path = action.path.display().to_string();
     let Some(content) = &action.content else {
@@ -390,8 +546,11 @@ fn apply_system(action: &Action) -> Result<(), String> {
     };
     let staged = env::temp_dir().join(format!("corral-{}", std::process::id()));
     fs::write(&staged, content).map_err(|error| format!("couldn't stage {path}: {error}"))?;
-    let result = run(
-        &[
+    let staged_path = staged.display().to_string();
+    let command: Vec<&str> = if action.path.exists() {
+        vec!["cp", "--", &staged_path, &path]
+    } else {
+        vec![
             "install",
             "-m",
             "644",
@@ -399,11 +558,12 @@ fn apply_system(action: &Action) -> Result<(), String> {
             "root",
             "-g",
             "root",
-            &staged.display().to_string(),
+            "--",
+            &staged_path,
             &path,
-        ],
-        true,
-    );
+        ]
+    };
+    let result = run(&command, true);
     let _ = fs::remove_file(&staged);
     result
 }
@@ -491,5 +651,28 @@ mod tests {
         let mode = std::os::unix::fs::PermissionsExt::mode(&fs::metadata(&file).unwrap().permissions());
         assert_eq!(mode & 0o777, 0o755);
         fs::remove_dir_all(&root).unwrap();
+    }
+
+    const HOSTS: &str = "127.0.0.1\tlocalhost\n::1\tlocalhost ipv6-localhost\n\n# Corral Rules\n127.0.97.105\tcorral.ai\t# Corral: 127.0.'a'.'i'\n10.0.0.5 nas # Corral-ish name, not ours\n";
+
+    #[test]
+    fn corrals_hosts_lines_are_recognised_not_removed() {
+        let marked = "127.0.0.1 localhost\n127.0.97.105 old.example # Corral\n# Corral\n10.0.0.5 nas # Corral-ish\n";
+        assert_eq!(corral_hosts_lines(marked, None), ["127.0.97.105 old.example # Corral"]);
+        assert_eq!(
+            corral_hosts_lines(HOSTS, Some("127.0.97.105 corral.ai")),
+            ["127.0.97.105\tcorral.ai\t# Corral: 127.0.'a'.'i'"]
+        );
+        assert!(corral_hosts_lines(HOSTS, None).is_empty());
+    }
+
+    #[test]
+    fn hosts_gain_one_line_at_the_end() {
+        let base = "127.0.0.1 localhost";
+        assert_eq!(
+            hosts_with(base, "127.0.97.105 corral.example").as_deref(),
+            Some("127.0.0.1 localhost\n127.0.97.105 corral.example # Corral\n")
+        );
+        assert_eq!(hosts_with(HOSTS, "127.0.97.105 corral.ai"), None);
     }
 }

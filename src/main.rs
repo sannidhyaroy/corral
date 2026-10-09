@@ -49,6 +49,12 @@ enum Command {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Remove Corral; your settings, certificate and backups stay unless you purge
+    Uninstall {
+        /// Also remove your settings, certificate and Corral's backups (model files are never touched)
+        #[arg(long)]
+        purge: bool,
+    },
 }
 
 fn main() -> ExitCode {
@@ -72,6 +78,7 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Command::Install { dry_run } => install(dry_run),
+        Command::Uninstall { purge } => uninstall(purge),
     }
 }
 
@@ -102,7 +109,7 @@ fn install(dry_run: bool) -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
-    match install::apply(&plan, &places) {
+    match install::apply(&plan, &places, install::Purpose::Install) {
         Ok(backups) => {
             println!("Corral is installed.");
             if let Some(backups) = backups {
@@ -228,6 +235,63 @@ fn logs() -> ExitCode {
     let error = journalctl.exec();
     eprintln!("corral: couldn't run journalctl: {error}");
     ExitCode::FAILURE
+}
+
+fn uninstall(purge: bool) -> ExitCode {
+    let places = install::Places::of_this_user();
+    let plan = install::plan_uninstall(&places, purge);
+    if plan.actions.is_empty() && plan.folders.is_empty() {
+        println!("Corral isn't installed.");
+        return ExitCode::SUCCESS;
+    }
+    print!("{}", install::describe(&plan));
+    println!("Model files are never touched.");
+    let expected = if purge {
+        println!("This removes your settings and certificate for good. Type `purge` to go ahead:");
+        "purge"
+    } else {
+        println!("Type `yes` to uninstall:");
+        "yes"
+    };
+    let mut answer = String::new();
+    let _ = io::stdin().read_line(&mut answer);
+    if answer.trim() != expected {
+        println!("Nothing was changed.");
+        return ExitCode::SUCCESS;
+    }
+
+    // Stop everything first, so no program runs from a file that's about to go
+    let units = systemd::corral_units();
+    if !units.is_empty()
+        && let Err(error) = systemd::stop(&units)
+    {
+        eprintln!("corral uninstall: couldn't stop Corral: {error}");
+        return ExitCode::FAILURE;
+    }
+    let purpose = if purge {
+        install::Purpose::Purge
+    } else {
+        install::Purpose::Uninstall
+    };
+    match install::apply(&plan, &places, purpose) {
+        Ok(backups) => {
+            println!("Corral is uninstalled.");
+            if let Some(backups) = backups {
+                println!("  Removed files are backed up in {}", backups.display());
+            }
+            if !plan.afterwards.is_empty() {
+                println!("Left for you:");
+                for item in &plan.afterwards {
+                    println!("  - {item}");
+                }
+            }
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("corral uninstall: {error}");
+            ExitCode::FAILURE
+        }
+    }
 }
 
 /// `corral ready <port> [--connect]`: waits up to a minute until a server on this machine answers its health check
