@@ -1,4 +1,5 @@
 pub mod config;
+pub mod look;
 pub mod router;
 pub mod status;
 pub mod system;

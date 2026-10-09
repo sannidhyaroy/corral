@@ -44,7 +44,12 @@ fn main() -> ExitCode {
             return ExitCode::SUCCESS;
         }
         Command::Status => {
-            print!("{}", Status::gather(&Config::load()).render_plain());
+            let status = Status::gather(&Config::load());
+            if corral::look::fancy() {
+                print!("{}", status.render_fancy());
+            } else {
+                print!("{}", status.render_plain());
+            }
             return ExitCode::SUCCESS;
         }
         Command::On => "on",

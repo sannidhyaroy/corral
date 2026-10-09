@@ -2,7 +2,8 @@
 
 use std::fmt::Write;
 
-use crate::config::Config;
+use crate::config::{Config, GpuLimits};
+use crate::look::{self, BOLD, DIM, GREEN, RED, RESET, YELLOW};
 use crate::router::{self, Model};
 use crate::system::{Snapshot, Usage};
 use crate::systemd;
@@ -11,6 +12,18 @@ use crate::systemd;
 const SWAP_SHOWN_FROM: u64 = 100 << 20;
 /// Temperatures at or above this get a warning sign.
 const HOT_CELSIUS: i64 = 85;
+/// RAM has no guard, so its bar warns at fixed shares of the total.
+const RAM_WARN: f64 = 0.85;
+const RAM_CRITICAL: f64 = 0.95;
+
+/// The llama: ears, a face that shows Corral's state, legs. The text column starts after it.
+const EARS: &str = "   ∩∩";
+const LEGS: &str = "  ╯   ╰";
+const ART_COLUMNS: usize = 11;
+const ASLEEP: &str = "(-ᴗ-) zᶻ";
+const AWAKE: &str = "(•ᴗ•)";
+const BUSY: &str = "(•̀ᴗ•́)و";
+const WORRIED: &str = "(•_•;)";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Router {
@@ -30,6 +43,7 @@ pub struct Status {
     pub router: Router,
     pub guard_running: bool,
     pub system: Snapshot,
+    pub gpu_limits: Option<GpuLimits>,
 }
 
 impl Status {
@@ -46,13 +60,155 @@ impl Status {
         } else {
             Router::Off
         };
+        let system = Snapshot::read();
+        let gpu_limits = system.gpu_memory.map(|gpu| config.gpu_limits(gpu.usage.total));
         Self {
             armed,
             gate_port: config.gate_port(),
             router,
             guard_running,
-            system: Snapshot::read(),
+            system,
+            gpu_limits,
         }
+    }
+
+    /// The page for a terminal: the llama, bars and colors.
+    pub fn render_fancy(&self) -> String {
+        let mut out = String::new();
+        let (face, message) = self.mood();
+        let headline = if self.armed {
+            format!("{BOLD}{GREEN}Corral · armed{RESET}")
+        } else {
+            format!("{DIM}Corral · off{RESET}")
+        };
+        let address = if self.armed {
+            format!("{DIM}http://ai.localhost:{}{RESET}", self.gate_port)
+        } else {
+            String::new()
+        };
+        let _ = writeln!(out, "{}{headline}", look::pad(EARS, ART_COLUMNS));
+        let _ = writeln!(out, "{}{message}", look::pad(&format!("  {face}"), ART_COLUMNS));
+        if address.is_empty() {
+            let _ = writeln!(out, "{LEGS}");
+        } else {
+            let _ = writeln!(out, "{}{address}", look::pad(LEGS, ART_COLUMNS));
+        }
+        if !self.guard_running && matches!(self.router, Router::Running(_) | Router::Starting) {
+            let _ = writeln!(
+                out,
+                "\n  {RED}The guard isn't running ⚠{RESET}  journalctl --user -u {}",
+                systemd::GUARD
+            );
+        }
+        out.push('\n');
+        out.push_str(&self.render_system_fancy());
+        out
+    }
+
+    /// The llama's face and what it says, from the router's state and how close GPU memory is to the guard's limit.
+    fn mood(&self) -> (&'static str, String) {
+        let (face, message) = match &self.router {
+            Router::Off if !self.armed => (ASLEEP, "the herd is asleep · corral on opens the gate".to_owned()),
+            Router::Off | Router::Waiting => (AWAKE, "waiting at the gate · no model loaded".to_owned()),
+            Router::Starting => (AWAKE, "waking up…".to_owned()),
+            Router::Running(models) if models.is_empty() => (AWAKE, "awake · no model loaded".to_owned()),
+            Router::Running(models) => {
+                let lines: Vec<String> = models
+                    .iter()
+                    .map(|model| match model.state.as_str() {
+                        "loaded" => format!("{BOLD}{}{RESET} loaded", model.name()),
+                        "loading" => format!("loading {BOLD}{}{RESET}…", model.name()),
+                        state => format!("{BOLD}{}{RESET} {state}", model.name()),
+                    })
+                    .collect();
+                let face = match models[0].state.as_str() {
+                    "loaded" => BUSY,
+                    "sleeping" => ASLEEP,
+                    _ => AWAKE,
+                };
+                (face, lines.join(" · "))
+            }
+        };
+        let near_limit = matches!(
+            (self.system.gpu_memory, self.gpu_limits),
+            (Some(gpu), Some(limits)) if gpu.usage.used >= limits.warn
+        );
+        if near_limit && matches!(self.router, Router::Running(_)) {
+            (WORRIED, message)
+        } else {
+            (face, message)
+        }
+    }
+
+    fn render_system_fancy(&self) -> String {
+        let system = &self.system;
+        let mut out = String::new();
+        if let (Some(gpu), Some(limits)) = (system.gpu_memory, self.gpu_limits) {
+            let color = if gpu.usage.used >= limits.unload {
+                RED
+            } else if gpu.usage.used >= limits.warn {
+                YELLOW
+            } else {
+                GREEN
+            };
+            let _ = writeln!(
+                out,
+                "  {:<7}{}  {}",
+                "GPU",
+                look::bar(fraction(gpu.usage), color),
+                amount(gpu.usage)
+            );
+        }
+        if let Some(ram) = system.ram {
+            let share = fraction(ram);
+            let color = if share >= RAM_CRITICAL {
+                RED
+            } else if share >= RAM_WARN {
+                YELLOW
+            } else {
+                GREEN
+            };
+            let swap = system
+                .swap
+                .filter(|swap| swap.used > SWAP_SHOWN_FROM)
+                .map(|swap| format!("  {DIM}· swap {} GiB{RESET}", gib(swap.used)))
+                .unwrap_or_default();
+            let _ = writeln!(out, "  {:<7}{}  {}{swap}", "RAM", look::bar(share, color), amount(ram));
+        }
+
+        let hot = |millidegrees: i64| {
+            let text = celsius(millidegrees);
+            if millidegrees / 1000 >= HOT_CELSIUS {
+                format!("{YELLOW}{text}{RESET}")
+            } else {
+                text
+            }
+        };
+        let mut readings = Vec::new();
+        if let Some(cpu) = system.cpu_temp {
+            readings.push(format!("CPU {}", hot(cpu)));
+        }
+        if let Some(gpu) = system.gpu_temp {
+            readings.push(format!("GPU {}", hot(gpu)));
+        }
+        if let Some(fan) = system.fan_rpm {
+            readings.push(format!("fan {} rpm", thousands(fan)));
+        }
+        if !readings.is_empty() {
+            let _ = writeln!(out, "  {:<7}{}", "Temp", readings.join(&format!(" {DIM}·{RESET} ")));
+        }
+
+        if let Some(on_charger) = system.on_charger {
+            let mut power = vec![if on_charger { "charger" } else { "battery" }.to_owned()];
+            if let Some(profile) = &system.power_profile {
+                power.push(profile.clone());
+            }
+            if let Some(microwatts) = system.gpu_power {
+                power.push(format!("chip {} W", microwatts / 1_000_000));
+            }
+            let _ = writeln!(out, "  {:<7}{}", "Power", power.join(&format!(" {DIM}·{RESET} ")));
+        }
+        out
     }
 
     /// The plain-text page: no colors, no art, stable for scripts and pipes.
@@ -135,6 +291,20 @@ fn usage(usage: Usage) -> String {
     format!("{} of {} GiB  ({percent}%)", gib(usage.used), gib(usage.total))
 }
 
+/// `used / total GiB`, right-aligned so numbers line up under each other.
+fn amount(usage: Usage) -> String {
+    format!("{:>4} / {} GiB", gib(usage.used), gib(usage.total))
+}
+
+#[allow(clippy::cast_precision_loss)] // memory sizes are far below f64's exact range
+fn fraction(usage: Usage) -> f64 {
+    if usage.total == 0 {
+        0.0
+    } else {
+        usage.used as f64 / usage.total as f64
+    }
+}
+
 #[allow(clippy::cast_precision_loss)] // memory sizes are far below f64's exact range
 fn gib(bytes: u64) -> String {
     format!("{:.1}", bytes as f64 / f64::from(1 << 30))
@@ -206,6 +376,7 @@ mod tests {
             }]),
             guard_running: true,
             system: machine(),
+            gpu_limits: None,
         };
         assert_eq!(
             status.render_plain(),
@@ -229,10 +400,41 @@ mod tests {
             router: Router::Waiting,
             guard_running: false,
             system: Snapshot::default(),
+            gpu_limits: None,
         };
         assert!(!status.render_plain().contains("Guard"));
         status.router = Router::Running(Vec::new());
         assert!(status.render_plain().contains("Guard    not running ⚠"));
+    }
+
+    #[test]
+    fn the_llama_shows_the_state() {
+        let mut status = Status {
+            armed: false,
+            gate_port: 24937,
+            router: Router::Off,
+            guard_running: false,
+            system: machine(),
+            gpu_limits: Some(GpuLimits {
+                warn: 20 * GIB,
+                unload: 22 * GIB,
+            }),
+        };
+        assert_eq!(status.mood().0, ASLEEP);
+        status.armed = true;
+        status.router = Router::Waiting;
+        assert_eq!(status.mood().0, AWAKE);
+        status.router = Router::Running(vec![Model {
+            id: "a".to_owned(),
+            alias: None,
+            state: "loaded".to_owned(),
+        }]);
+        assert_eq!(status.mood().0, BUSY);
+        status.system.gpu_memory = status.system.gpu_memory.map(|mut gpu| {
+            gpu.usage.used = 21 * GIB;
+            gpu
+        });
+        assert_eq!(status.mood().0, WORRIED);
     }
 
     #[test]
