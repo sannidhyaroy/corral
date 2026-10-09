@@ -1,4 +1,5 @@
 pub mod config;
+pub mod gguf;
 pub mod guard;
 pub mod helpers;
 pub mod http;
