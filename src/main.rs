@@ -173,7 +173,7 @@ fn on(config: &Config, with: &[String], without: &[String]) -> ExitCode {
 
     let gate = format!("http://ai.localhost:{}", config.gate_port());
     println!("Corral armed. Models start on their first request and stop after idle.");
-    println!("  Web UI:  {gate}");
+    println!("  Web UI:  {}", config.web_address());
     println!("  API:     {gate}/v1");
     for helper in &helpers {
         let line = if armed.iter().any(|a| a.name == helper.name) {

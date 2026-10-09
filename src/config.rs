@@ -127,6 +127,14 @@ impl Config {
         self.get("name")
     }
 
+    /// Where the web UI is: the custom name over HTTPS, or the gate.
+    pub fn web_address(&self) -> String {
+        self.name().map_or_else(
+            || format!("http://ai.localhost:{}", self.gate_port()),
+            |name| format!("https://{name}"),
+        )
+    }
+
     /// The local address the custom name points to (`name_address`).
     pub fn name_address(&self) -> &str {
         self.get("name_address").unwrap_or(DEFAULT_NAME_ADDRESS)

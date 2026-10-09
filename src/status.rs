@@ -97,6 +97,8 @@ impl HelperStatus {
 pub struct Status {
     pub armed: bool,
     pub gate_port: u16,
+    /// Where the web UI is.
+    pub web: String,
     pub router: Router,
     pub guard_running: bool,
     pub helpers: Vec<HelperStatus>,
@@ -123,6 +125,7 @@ impl Status {
         Self {
             armed,
             gate_port: config.gate_port(),
+            web: config.web_address(),
             router,
             guard_running,
             helpers: gather_helpers(),
@@ -141,7 +144,7 @@ impl Status {
             format!("{DIM}Corral · off{RESET}")
         };
         let address = if self.armed {
-            format!("{DIM}http://ai.localhost:{}{RESET}", self.gate_port)
+            format!("{DIM}{}{RESET}", self.web)
         } else {
             String::new()
         };
@@ -311,6 +314,7 @@ impl Status {
         json!({
             "armed": self.armed,
             "gate": format!("http://ai.localhost:{}", self.gate_port),
+            "web": self.web,
             "router": {"state": router, "models": models},
             "guard": if self.guard_running { "running" } else { "stopped" },
             "helpers": self.helpers.iter().map(|helper| json!({
@@ -531,6 +535,7 @@ mod tests {
         let status = Status {
             armed: true,
             gate_port: 24937,
+            web: "http://ai.localhost:24937".to_owned(),
             router: Router::Running(vec![Model {
                 id: "gemma-32k".to_owned(),
                 alias: Some("Gemma 4 · Gallop".to_owned()),
@@ -560,6 +565,7 @@ mod tests {
         let mut status = Status {
             armed: true,
             gate_port: 24937,
+            web: "http://ai.localhost:24937".to_owned(),
             router: Router::Waiting,
             guard_running: false,
             helpers: Vec::new(),
@@ -576,6 +582,7 @@ mod tests {
         let mut status = Status {
             armed: false,
             gate_port: 24937,
+            web: "http://ai.localhost:24937".to_owned(),
             router: Router::Off,
             guard_running: false,
             helpers: Vec::new(),
@@ -614,6 +621,7 @@ mod tests {
         let status = Status {
             armed: true,
             gate_port: 24937,
+            web: "http://ai.localhost:24937".to_owned(),
             router: Router::Waiting,
             guard_running: false,
             helpers: Vec::new(),
@@ -636,6 +644,7 @@ mod tests {
         let status = Status {
             armed: true,
             gate_port: 24937,
+            web: "http://ai.localhost:24937".to_owned(),
             router: Router::Waiting,
             guard_running: false,
             helpers: vec![HelperStatus {
