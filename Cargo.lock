@@ -152,6 +152,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "libc",
+ "ring",
  "serde_json",
  "tokio",
  "tokio-rustls",
