@@ -6,8 +6,8 @@ use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::Shell;
 use corral::config::Config;
 use corral::helpers::{self, Helper};
-use corral::install;
 use corral::status::Status;
+use corral::{install, keys};
 use corral::{router, systemd};
 
 /// Herd and serve your llama.cpp models, on demand and behind one gate.
@@ -55,6 +55,28 @@ enum Command {
         #[arg(long)]
         purge: bool,
     },
+    /// API keys for your other devices
+    #[command(subcommand)]
+    Key(KeyCommand),
+}
+
+#[derive(Subcommand)]
+enum KeyCommand {
+    /// Make a key for a device; it's shown once
+    Add {
+        /// A name for the device, such as `phone`
+        device: String,
+        /// Also allow the router's built-in tools (they act on this machine)
+        #[arg(long, value_name = "WHAT", value_parser = ["tools"])]
+        allow: Option<String>,
+    },
+    /// List the devices that have a key
+    List,
+    /// Revoke a device's key; it stops working on its next request
+    Revoke {
+        /// The device's name
+        device: String,
+    },
 }
 
 fn main() -> ExitCode {
@@ -79,6 +101,7 @@ fn main() -> ExitCode {
         }
         Command::Install { dry_run } => install(dry_run),
         Command::Uninstall { purge } => uninstall(purge),
+        Command::Key(command) => key(command),
     }
 }
 
@@ -238,6 +261,52 @@ fn logs() -> ExitCode {
     let error = journalctl.exec();
     eprintln!("corral: couldn't run journalctl: {error}");
     ExitCode::FAILURE
+}
+
+fn key(command: KeyCommand) -> ExitCode {
+    match command {
+        KeyCommand::Add { device, allow } => match keys::add(&device, allow.is_some()) {
+            Ok(key) => {
+                println!("{key}");
+                println!(
+                    "The key for `{device}`. It isn't stored, so copy it now; `corral key revoke {device}` ends it."
+                );
+                if allow.is_some() {
+                    println!("It may use the router's tools, which act on this machine.");
+                }
+                ExitCode::SUCCESS
+            }
+            Err(error) => {
+                eprintln!("corral: {error}");
+                ExitCode::FAILURE
+            }
+        },
+        KeyCommand::List => {
+            let entries = keys::load();
+            if entries.is_empty() {
+                println!("No device has a key. `corral key add <device>` makes one.");
+            }
+            for entry in entries {
+                let tools = if entry.allow_tools { "  (tools allowed)" } else { "" };
+                println!("{}{tools}", entry.device);
+            }
+            ExitCode::SUCCESS
+        }
+        KeyCommand::Revoke { device } => match keys::revoke(&device) {
+            Ok(true) => {
+                println!("`{device}`'s key is revoked.");
+                ExitCode::SUCCESS
+            }
+            Ok(false) => {
+                eprintln!("corral: `{device}` has no key");
+                ExitCode::FAILURE
+            }
+            Err(error) => {
+                eprintln!("corral: {error}");
+                ExitCode::FAILURE
+            }
+        },
+    }
 }
 
 fn uninstall(purge: bool) -> ExitCode {
