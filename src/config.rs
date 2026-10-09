@@ -15,6 +15,25 @@ pub fn config_dir() -> PathBuf {
     base.join("corral")
 }
 
+/// The `[name]` sections of an INI file such as `helpers.ini` or `models.ini`, each read like `corral.conf`. Lines
+/// before the first section are ignored.
+pub fn sections(text: &str) -> Vec<(String, Config)> {
+    let mut sections: Vec<(String, String)> = Vec::new();
+    for line in text.lines() {
+        let trimmed = line.split_once('#').map_or(line, |(before, _)| before).trim();
+        if let Some(name) = trimmed.strip_prefix('[').and_then(|rest| rest.strip_suffix(']')) {
+            sections.push((name.trim().to_owned(), String::new()));
+        } else if let Some((_, body)) = sections.last_mut() {
+            body.push_str(line);
+            body.push('\n');
+        }
+    }
+    sections
+        .into_iter()
+        .map(|(name, body)| (name, Config::parse(&body)))
+        .collect()
+}
+
 /// The gate's port: 24937 is `0x61 0x69`, the bytes of "ai".
 pub const DEFAULT_GATE_PORT: u16 = 24937;
 /// llama.cpp's router, reachable only from this machine.

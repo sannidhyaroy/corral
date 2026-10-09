@@ -9,7 +9,7 @@
 
 use std::fs;
 
-use crate::config::{Config, config_dir};
+use crate::config::{self, Config, config_dir};
 
 const RESERVED_NAMES: &[&str] = &["router", "guard", "web"];
 const CORRAL_KEYS: &[&str] = &["type", "port", "internal-port", "armed", "yields", "claims", "command"];
@@ -105,8 +105,8 @@ pub fn load() -> (Vec<Helper>, Vec<String>) {
 pub fn parse(text: &str) -> (Vec<Helper>, Vec<String>) {
     let mut helpers = Vec::new();
     let mut problems = Vec::new();
-    for (name, body) in sections(text) {
-        match helper(&name, &Config::parse(&body)) {
+    for (name, section) in config::sections(text) {
+        match helper(&name, &section) {
             Ok(helper) if helpers.iter().any(|h: &Helper| h.name == helper.name) => {
                 problems.push(format!("[{name}]: defined twice"));
             }
@@ -115,21 +115,6 @@ pub fn parse(text: &str) -> (Vec<Helper>, Vec<String>) {
         }
     }
     (helpers, problems)
-}
-
-/// The `[name]` sections of an INI text and the lines under each.
-fn sections(text: &str) -> Vec<(String, String)> {
-    let mut sections: Vec<(String, String)> = Vec::new();
-    for line in text.lines() {
-        let trimmed = line.split_once('#').map_or(line, |(before, _)| before).trim();
-        if let Some(name) = trimmed.strip_prefix('[').and_then(|rest| rest.strip_suffix(']')) {
-            sections.push((name.trim().to_owned(), String::new()));
-        } else if let Some((_, body)) = sections.last_mut() {
-            body.push_str(line);
-            body.push('\n');
-        }
-    }
-    sections
 }
 
 fn helper(name: &str, section: &Config) -> Result<Helper, String> {
