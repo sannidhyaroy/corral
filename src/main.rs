@@ -78,7 +78,8 @@ fn main() -> ExitCode {
 fn install(dry_run: bool) -> ExitCode {
     let mut completion = Vec::new();
     clap_complete::generate(Shell::Bash, &mut Cli::command(), "corral", &mut completion);
-    let plan = install::plan(&install::Places::of_this_user(), completion);
+    let places = install::Places::of_this_user();
+    let plan = install::plan(&places, completion);
     print!("{}", install::describe(&plan));
     if !plan.blockers.is_empty() {
         return ExitCode::FAILURE;
@@ -87,8 +88,43 @@ fn install(dry_run: bool) -> ExitCode {
         println!("Nothing was changed (--dry-run).");
         return ExitCode::SUCCESS;
     }
-    eprintln!("corral install: only --dry-run works so far");
-    ExitCode::FAILURE
+    if plan.actions.iter().all(|action| action.change == install::Change::Keep) {
+        println!("Corral is already up to date.");
+        return ExitCode::SUCCESS;
+    }
+
+    print!("Go ahead? [y/N] ");
+    let _ = io::Write::flush(&mut io::stdout());
+    let mut answer = String::new();
+    let _ = io::stdin().read_line(&mut answer);
+    if !matches!(answer.trim(), "y" | "Y" | "yes") {
+        println!("Nothing was changed.");
+        return ExitCode::SUCCESS;
+    }
+
+    match install::apply(&plan, &places) {
+        Ok(backups) => {
+            println!("Corral is installed.");
+            if let Some(backups) = backups {
+                println!("  Replaced files are backed up in {}", backups.display());
+            }
+            let [armed] = systemd::active(&[systemd::TARGET])[..] else {
+                unreachable!("systemd::active returns one state per unit")
+            };
+            if armed {
+                println!("  Corral is armed with the programs from before; `corral off && corral on` switches.");
+            }
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("corral install: {error}");
+            eprintln!(
+                "Files changed before this point are backed up in {}",
+                places.data.join("backups").display()
+            );
+            ExitCode::FAILURE
+        }
+    }
 }
 
 fn on(config: &Config, with: &[String], without: &[String]) -> ExitCode {

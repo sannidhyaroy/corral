@@ -317,3 +317,179 @@ pub fn describe(plan: &Plan) -> String {
     }
     out
 }
+
+/// Carries out a plan: backs up every file it replaces or removes, writes the user's files atomically, and hands
+/// system files to `sudo`. Returns where the backups went, if any were made.
+pub fn apply(plan: &Plan, places: &Places) -> Result<Option<PathBuf>, String> {
+    let backups = places.data.join("backups").join(timestamp());
+    let mut backed_up = false;
+    for action in &plan.actions {
+        if matches!(action.change, Change::Replace | Change::Remove) {
+            back_up(&action.path, &backups)?;
+            backed_up = true;
+        }
+    }
+
+    let mut system_changed = false;
+    for action in plan.actions.iter().filter(|action| action.change != Change::Keep) {
+        if action.system {
+            apply_system(action)?;
+            system_changed = true;
+        } else {
+            apply_user(action)?;
+        }
+    }
+
+    run(&["systemctl", "--user", "daemon-reload"], false)?;
+    if system_changed {
+        run(&["systemctl", "daemon-reload"], true)?;
+        run(&["systemctl", "enable", "--now", "corral-web.socket"], true)?;
+        // A web front still running from before picks up its new program on the next visit
+        run(&["systemctl", "try-restart", "corral-web.service"], true)?;
+    }
+    Ok(backed_up.then_some(backups))
+}
+
+/// Copies a file into the backup folder under its full path.
+fn back_up(path: &Path, backups: &Path) -> Result<(), String> {
+    let target = backups.join(path.strip_prefix("/").unwrap_or(path));
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent).map_err(|error| format!("couldn't create {}: {error}", parent.display()))?;
+    }
+    fs::copy(path, &target).map_err(|error| format!("couldn't back up {}: {error}", path.display()))?;
+    Ok(())
+}
+
+/// Writes or removes one of the user's files. New content goes to a temporary file first and replaces the old one
+/// in a single rename, so a file is never half-written.
+fn apply_user(action: &Action) -> Result<(), String> {
+    let path = &action.path;
+    let Some(content) = &action.content else {
+        return fs::remove_file(path).map_err(|error| format!("couldn't remove {}: {error}", path.display()));
+    };
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("{} has no folder", path.display()))?;
+    fs::create_dir_all(parent).map_err(|error| format!("couldn't create {}: {error}", parent.display()))?;
+    let temporary = parent.join(format!(
+        ".{}.corral-new",
+        path.file_name().unwrap_or_default().to_string_lossy()
+    ));
+    fs::write(&temporary, content).map_err(|error| format!("couldn't write {}: {error}", temporary.display()))?;
+    let mode = if action.executable { 0o755 } else { 0o644 };
+    fs::set_permissions(&temporary, std::os::unix::fs::PermissionsExt::from_mode(mode))
+        .map_err(|error| format!("couldn't set permissions on {}: {error}", temporary.display()))?;
+    fs::rename(&temporary, path).map_err(|error| format!("couldn't replace {}: {error}", path.display()))
+}
+
+/// Writes a system file through `sudo install`, which sets owner and mode in the same step.
+fn apply_system(action: &Action) -> Result<(), String> {
+    let path = action.path.display().to_string();
+    let Some(content) = &action.content else {
+        return run(&["rm", "--", &path], true);
+    };
+    let staged = env::temp_dir().join(format!("corral-{}", std::process::id()));
+    fs::write(&staged, content).map_err(|error| format!("couldn't stage {path}: {error}"))?;
+    let result = run(
+        &[
+            "install",
+            "-m",
+            "644",
+            "-o",
+            "root",
+            "-g",
+            "root",
+            &staged.display().to_string(),
+            &path,
+        ],
+        true,
+    );
+    let _ = fs::remove_file(&staged);
+    result
+}
+
+/// Runs a command, through `sudo` when `root`, showing it first.
+fn run(command: &[&str], root: bool) -> Result<(), String> {
+    let mut words: Vec<&str> = command.to_vec();
+    if root {
+        words.insert(0, "sudo");
+    }
+    println!("  $ {}", words.join(" "));
+    let status = std::process::Command::new(words[0])
+        .args(&words[1..])
+        .status()
+        .map_err(|error| format!("couldn't run {}: {error}", words[0]))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("`{}` failed", words.join(" ")))
+    }
+}
+
+/// The current time in UTC as `2026-10-09-201530`, for backup folder names.
+fn timestamp() -> String {
+    let seconds = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs());
+    let (days, time) = (seconds / 86_400, seconds % 86_400);
+    let (year, month, day) = civil_date(days);
+    format!(
+        "{year:04}-{month:02}-{day:02}-{:02}{:02}{:02}",
+        time / 3600,
+        time % 3600 / 60,
+        time % 60
+    )
+}
+
+/// Days since 1970-01-01 as a calendar date (Howard Hinnant's algorithm).
+fn civil_date(days: u64) -> (u64, u64, u64) {
+    let z = days + 719_468;
+    let era = z / 146_097;
+    let day_of_era = z - era * 146_097;
+    let year_of_era = (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_index = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_index + 2) / 5 + 1;
+    let month = if month_index < 10 {
+        month_index + 3
+    } else {
+        month_index - 9
+    };
+    let year = year_of_era + era * 400 + u64::from(month <= 2);
+    (year, month, day)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn calendar_dates() {
+        assert_eq!(civil_date(0), (1970, 1, 1));
+        assert_eq!(civil_date(20_735), (2026, 10, 9));
+        assert_eq!(civil_date(11_016), (2000, 2, 29));
+    }
+
+    #[test]
+    fn user_files_are_written_whole_and_backed_up() {
+        let root = env::temp_dir().join(format!("corral-install-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let file = root.join("bin/corral");
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(&file, "old").unwrap();
+
+        let backups = root.join("backups");
+        back_up(&file, &backups).unwrap();
+        let replace = action(file.clone(), b"new".to_vec(), true, false);
+        assert_eq!(replace.change, Change::Replace);
+        apply_user(&replace).unwrap();
+
+        assert_eq!(fs::read_to_string(&file).unwrap(), "new");
+        let saved = backups.join(file.strip_prefix("/").unwrap());
+        assert_eq!(fs::read_to_string(saved).unwrap(), "old");
+        let mode = std::os::unix::fs::PermissionsExt::mode(&fs::metadata(&file).unwrap().permissions());
+        assert_eq!(mode & 0o777, 0o755);
+        fs::remove_dir_all(&root).unwrap();
+    }
+}
