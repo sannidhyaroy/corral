@@ -15,6 +15,11 @@ pub fn config_dir() -> PathBuf {
     base.join("corral")
 }
 
+/// The gate's port: 24937 is `0x61 0x69`, the bytes of "ai".
+pub const DEFAULT_GATE_PORT: u16 = 24937;
+/// llama.cpp's router, reachable only from this machine.
+pub const DEFAULT_ROUTER_PORT: u16 = 18080;
+
 #[derive(Debug, Default)]
 pub struct Config {
     values: HashMap<String, String>,
@@ -67,6 +72,23 @@ impl Config {
             })
             .unwrap_or_default()
     }
+
+    /// Where apps, browsers and other devices reach Corral (`gate_port`).
+    pub fn gate_port(&self) -> u16 {
+        self.port("gate_port", DEFAULT_GATE_PORT)
+    }
+
+    /// Where llama.cpp's router listens on this machine (`router_port`).
+    pub fn router_port(&self) -> u16 {
+        self.port("router_port", DEFAULT_ROUTER_PORT)
+    }
+
+    fn port(&self, key: &str, default: u16) -> u16 {
+        self.get(key)
+            .and_then(|value| value.parse().ok())
+            .filter(|&port| port != 0)
+            .unwrap_or(default)
+    }
 }
 
 #[cfg(test)]
@@ -112,5 +134,13 @@ empty =
             ["Gemma 4-26b-a4b-256k", "Gemma 4-26b-a4b-pantheon"]
         );
         assert!(Config::parse("").list("exclusive").is_empty());
+    }
+
+    #[test]
+    fn ports_default_unless_set_to_a_valid_port() {
+        let config = Config::parse("router_port = 19090\ngate_port = 0");
+        assert_eq!(config.router_port(), 19090);
+        assert_eq!(config.gate_port(), DEFAULT_GATE_PORT);
+        assert_eq!(Config::parse("gate_port = 70000").gate_port(), DEFAULT_GATE_PORT);
     }
 }
