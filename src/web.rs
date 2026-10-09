@@ -12,11 +12,12 @@
 //!   chat keeps a live stream to the router, which counts as a request.
 //! - Without systemd it listens on 127.0.0.1:18480, 18443 and 18937 for testing.
 
+mod access;
 mod panel;
 mod session;
 
 use std::io::Read;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::os::fd::FromRawFd;
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -35,7 +36,10 @@ use tokio_rustls::rustls::ServerConfig;
 use tokio_rustls::rustls::pki_types::pem::PemObject;
 use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer};
 
-use crate::config::{Config, config_dir};
+use crate::config::{AddressRange, Config, config_dir};
+use crate::keys::Keys;
+
+use access::Requester;
 
 const IDLE_EXIT: Duration = Duration::from_mins(5);
 const ROUTER_IDLE: Duration = Duration::from_mins(15);
@@ -84,6 +88,10 @@ impl Door {
 static ROUTER: OnceLock<SocketAddr> = OnceLock::new();
 /// Pages allowed to open the gate: Corral's own.
 static ORIGINS: OnceLock<Vec<String>> = OnceLock::new();
+/// Addresses treated like this machine (`trusted`).
+static TRUSTED: OnceLock<Vec<AddressRange>> = OnceLock::new();
+/// The devices' API keys, reread when the key file changes.
+static KEYS: Mutex<Keys> = Mutex::new(Keys::empty());
 /// One router start at a time; requests arriving meanwhile wait for it.
 static STARTING: Mutex<()> = Mutex::new(());
 /// The last answer to "is Corral armed?" and when it was asked.
@@ -147,6 +155,7 @@ pub fn run() -> ExitCode {
         origins.extend([format!("https://{name}"), format!("https://{name}:18443")]);
     }
     let _ = ORIGINS.set(origins);
+    let _ = TRUSTED.set(config.trusted());
 
     let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
         Ok(runtime) => runtime,
@@ -219,9 +228,10 @@ async fn serve() -> std::io::Result<()> {
         let listener = TcpListener::from_std(std_listener)?;
         tokio::spawn(async move {
             loop {
-                let Ok((stream, _)) = listener.accept().await else {
+                let Ok((stream, peer)) = listener.accept().await else {
                     continue;
                 };
+                let peer = peer.ip();
                 LAST_ACTIVE.store(now(), Ordering::SeqCst);
                 let acceptor = acceptor.clone();
                 tokio::spawn(async move {
@@ -234,11 +244,15 @@ async fn serve() -> std::io::Result<()> {
                             let Ok(tls) = acceptor.accept(stream).await else {
                                 return;
                             };
-                            let _ = http.serve_connection(TokioIo::new(tls), service_fn(forward)).await;
+                            let _ = http
+                                .serve_connection(TokioIo::new(tls), service_fn(move |req| forward(req, peer)))
+                                .await;
                         }
                         (Door::Https, None) => {}
                         (Door::Gate, _) => {
-                            let _ = http.serve_connection(TokioIo::new(stream), service_fn(forward)).await;
+                            let _ = http
+                                .serve_connection(TokioIo::new(stream), service_fn(move |req| forward(req, peer)))
+                                .await;
                         }
                     }
                 });
@@ -341,8 +355,59 @@ fn off(req: &Request<Incoming>) -> Response<Body> {
     }
 }
 
+/// Who is asking: this machine or a trusted address, another device with a valid key, or a stranger.
+fn requester(req: &Request<Incoming>, peer: IpAddr) -> Requester {
+    let peer = peer.to_canonical();
+    let trusted = TRUSTED
+        .get()
+        .is_some_and(|ranges| ranges.iter().any(|range| range.contains(peer)));
+    if peer.is_loopback() || trusted {
+        return Requester::Local;
+    }
+    let Some(key) = sent_key(req) else {
+        return Requester::Stranger;
+    };
+    let mut keys = KEYS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    keys.check(&key).map_or(Requester::Stranger, |entry| Requester::Key {
+        allow_tools: entry.allow_tools,
+    })
+}
+
+/// A key sent OpenAI's way (`Authorization: Bearer …`) or Anthropic's (`x-api-key: …`).
+fn sent_key(req: &Request<Incoming>) -> Option<String> {
+    let header = |name: &str| req.headers().get(name).and_then(|value| value.to_str().ok());
+    header("authorization")
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .or_else(|| header("x-api-key"))
+        .map(|key| key.trim().to_owned())
+}
+
+/// The answer to a refused request, in OpenAI's error format.
+fn refused(status: StatusCode) -> Response<Body> {
+    let message = if status == StatusCode::FORBIDDEN {
+        "The router's tools act on the machine running Corral, so only that machine, trusted addresses and keys made \
+         with `corral key add <device> --allow tools` may use them."
+    } else {
+        "This device needs a Corral API key: on the machine running Corral, run `corral key add <device>`, then send \
+         the key as `Authorization: Bearer <key>`."
+    };
+    let kind = if status == StatusCode::FORBIDDEN {
+        "permission_error"
+    } else {
+        "authentication_error"
+    };
+    let body = serde_json::json!({"error": {"code": status.as_u16(), "type": kind, "message": message}});
+    let mut response = own(status, "application/json", body.to_string());
+    if status == StatusCode::UNAUTHORIZED {
+        response
+            .headers_mut()
+            .insert(hyper::header::WWW_AUTHENTICATE, "Bearer".parse().expect("valid header"));
+    }
+    response
+}
+
 /// The gate and the HTTPS door: Corral's own endpoints, then the router, started on demand.
-async fn forward(mut req: Request<Incoming>) -> Result<Response<Body>, hyper::Error> {
+async fn forward(mut req: Request<Incoming>, peer: IpAddr) -> Result<Response<Body>, hyper::Error> {
     let busy = Busy::start();
     // Corral's own endpoints and the worker replacement answer whether Corral is on or off (a browser checking its
     // worker while Corral is off still drops it)
@@ -369,6 +434,17 @@ async fn forward(mut req: Request<Incoming>) -> Result<Response<Body>, hyper::Er
             });
         }
         _ => {}
+    }
+
+    // Decided before anything starts: a refused request never wakes the router
+    let requester = requester(&req, peer);
+    if let Err(status) = access::decide(req.method().as_str(), req.uri().path(), requester) {
+        return Ok(refused(status));
+    }
+    // Corral's keys stay at the gate; the router never sees them
+    if sent_key(&req).is_some_and(|key| crate::keys::well_formed(&key)) {
+        req.headers_mut().remove("authorization");
+        req.headers_mut().remove("x-api-key");
     }
 
     if !armed().await {

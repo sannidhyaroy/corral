@@ -160,13 +160,20 @@ pub fn revoke(device: &str) -> Result<bool, String> {
 }
 
 /// The key file as the web front sees it: reread whenever it changes on disk, checked with one `stat` per request.
-#[derive(Default)]
 pub struct Keys {
     entries: Vec<Entry>,
     modified: Option<SystemTime>,
 }
 
 impl Keys {
+    /// No keys yet; the file is read on the first check.
+    pub const fn empty() -> Self {
+        Self {
+            entries: Vec::new(),
+            modified: None,
+        }
+    }
+
     /// The device whose key this is, if it's valid.
     pub fn check(&mut self, key: &str) -> Option<&Entry> {
         if !well_formed(key) {
