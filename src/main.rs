@@ -22,7 +22,11 @@ enum Command {
     Off,
     /// Armed or not, what is running, which model is loaded, GPU memory (default)
     #[command(visible_alias = "st")]
-    Status,
+    Status {
+        /// Print the status as JSON, for scripts and status bars
+        #[arg(long)]
+        json: bool,
+    },
     /// Follow the servers' logs
     #[command(visible_alias = "lg")]
     Logs,
@@ -38,14 +42,16 @@ fn main() -> ExitCode {
     }
 
     let cli = Cli::parse();
-    let name = match cli.command.unwrap_or(Command::Status) {
+    let name = match cli.command.unwrap_or(Command::Status { json: false }) {
         Command::Completions { shell } => {
             clap_complete::generate(shell, &mut Cli::command(), "corral", &mut io::stdout());
             return ExitCode::SUCCESS;
         }
-        Command::Status => {
+        Command::Status { json } => {
             let status = Status::gather(&Config::load());
-            if corral::look::fancy() {
+            if json {
+                println!("{:#}", status.to_json());
+            } else if corral::look::fancy() {
                 print!("{}", status.render_fancy());
             } else {
                 print!("{}", status.render_plain());

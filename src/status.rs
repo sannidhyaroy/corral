@@ -4,8 +4,10 @@ use std::fmt::Write;
 
 use crate::config::{Config, GpuLimits};
 use crate::look::{self, BOLD, DIM, GREEN, RED, RESET, YELLOW};
+use serde_json::{Value, json};
+
 use crate::router::{self, Model};
-use crate::system::{Snapshot, Usage};
+use crate::system::{GpuMemoryKind, Snapshot, Usage};
 use crate::systemd;
 
 /// Swap use below this is noise and isn't shown.
@@ -209,6 +211,54 @@ impl Status {
             let _ = writeln!(out, "  {:<7}{}", "Power", power.join(&format!(" {DIM}·{RESET} ")));
         }
         out
+    }
+
+    /// The status for scripts and status bars: sizes in bytes, temperatures in °C, power in watts.
+    pub fn to_json(&self) -> Value {
+        let (router, models) = match &self.router {
+            Router::Off => ("off", &[][..]),
+            Router::Waiting => ("waiting", &[][..]),
+            Router::Starting => ("starting", &[][..]),
+            Router::Running(models) => ("running", models.as_slice()),
+        };
+        let models: Vec<Value> = models
+            .iter()
+            .map(|model| json!({"id": model.id, "name": model.name(), "state": model.state}))
+            .collect();
+        let usage = |usage: Option<Usage>| usage.map(|u| json!({"used": u.used, "total": u.total}));
+        let system = &self.system;
+        let gpu_memory = system.gpu_memory.map(|gpu| {
+            json!({
+                "kind": match gpu.kind {
+                    GpuMemoryKind::Gtt => "gtt",
+                    GpuMemoryKind::Vram => "vram",
+                },
+                "used": gpu.usage.used,
+                "total": gpu.usage.total,
+                "warn": self.gpu_limits.map(|limits| limits.warn),
+                "unload": self.gpu_limits.map(|limits| limits.unload),
+            })
+        });
+        #[allow(clippy::cast_precision_loss)] // sensor readings are small
+        let celsius = |millidegrees: Option<i64>| millidegrees.map(|value| value as f64 / 1000.0);
+        #[allow(clippy::cast_precision_loss)] // sensor readings are small
+        let watts = system.gpu_power.map(|microwatts| microwatts as f64 / 1_000_000.0);
+        json!({
+            "armed": self.armed,
+            "gate": format!("http://ai.localhost:{}", self.gate_port),
+            "router": {"state": router, "models": models},
+            "guard": if self.guard_running { "running" } else { "stopped" },
+            "gpu_memory": gpu_memory,
+            "ram": usage(system.ram),
+            "swap": usage(system.swap),
+            "temperature": {"cpu": celsius(system.cpu_temp), "gpu": celsius(system.gpu_temp)},
+            "fan_rpm": system.fan_rpm,
+            "power": {
+                "on_charger": system.on_charger,
+                "profile": system.power_profile,
+                "gpu_watts": watts,
+            },
+        })
     }
 
     /// The plain-text page: no colors, no art, stable for scripts and pipes.
@@ -442,5 +492,26 @@ mod tests {
         assert_eq!(thousands(7), "7");
         assert_eq!(thousands(2100), "2,100");
         assert_eq!(thousands(1_234_567), "1,234,567");
+    }
+
+    #[test]
+    fn json_for_scripts() {
+        let status = Status {
+            armed: true,
+            gate_port: 24937,
+            router: Router::Waiting,
+            guard_running: false,
+            system: machine(),
+            gpu_limits: Some(GpuLimits {
+                warn: 20 * GIB,
+                unload: 22 * GIB,
+            }),
+        };
+        let json = status.to_json();
+        assert_eq!(json["router"]["state"], "waiting");
+        assert_eq!(json["gpu_memory"]["kind"], "gtt");
+        assert_eq!(json["gpu_memory"]["warn"], 20 * GIB);
+        assert_eq!(json["temperature"]["gpu"], 91.0);
+        assert_eq!(json["power"]["profile"], "balanced");
     }
 }
