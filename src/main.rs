@@ -1,4 +1,5 @@
 use std::io;
+use std::os::unix::process::CommandExt;
 use std::process::ExitCode;
 
 use clap::{CommandFactory, Parser, Subcommand};
@@ -47,10 +48,7 @@ fn main() -> ExitCode {
         Command::On => on(&Config::load()),
         Command::Off => off(),
         Command::Status { json } => status(json),
-        Command::Logs => {
-            eprintln!("corral logs: not implemented yet");
-            ExitCode::FAILURE
-        }
+        Command::Logs => logs(),
         Command::Completions { shell } => {
             clap_complete::generate(shell, &mut Cli::command(), "corral", &mut io::stdout());
             ExitCode::SUCCESS
@@ -85,6 +83,24 @@ fn off() -> ExitCode {
     }
     println!("Corral disarmed. Nothing is listening and nothing will start.");
     ExitCode::SUCCESS
+}
+
+fn logs() -> ExitCode {
+    let units = systemd::corral_units();
+    if units.is_empty() {
+        eprintln!("corral: no Corral units are installed");
+        return ExitCode::FAILURE;
+    }
+    // journalctl can't match a wildcard against user units, so each one is named
+    let mut journalctl = std::process::Command::new("journalctl");
+    journalctl.args(["--user", "--follow"]);
+    for unit in &units {
+        journalctl.args(["--unit", unit]);
+    }
+    // Replaces this process, so Ctrl+C and the exit code are journalctl's own
+    let error = journalctl.exec();
+    eprintln!("corral: couldn't run journalctl: {error}");
+    ExitCode::FAILURE
 }
 
 fn status(json: bool) -> ExitCode {
