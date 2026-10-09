@@ -36,7 +36,7 @@ use tokio_rustls::rustls::ServerConfig;
 use tokio_rustls::rustls::pki_types::pem::PemObject;
 use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer};
 
-use crate::config::{AddressRange, Config, config_dir};
+use crate::config::{AddressRange, Config, NameListen, config_dir};
 use crate::keys::Keys;
 
 use access::Requester;
@@ -93,6 +93,8 @@ static ROUTER: OnceLock<SocketAddr> = OnceLock::new();
 static ORIGINS: OnceLock<Vec<String>> = OnceLock::new();
 /// Addresses treated like this machine (`trusted`).
 static TRUSTED: OnceLock<Vec<AddressRange>> = OnceLock::new();
+/// Who reaches the custom name's ports 80 and 443 (`name_listen`).
+static NAME_LISTEN: OnceLock<NameListen> = OnceLock::new();
 /// The devices' API keys, reread when the key file changes.
 static KEYS: Mutex<Keys> = Mutex::new(Keys::empty());
 /// One router start at a time; requests arriving meanwhile wait for it.
@@ -159,6 +161,7 @@ pub fn run() -> ExitCode {
     }
     let _ = ORIGINS.set(origins);
     let _ = TRUSTED.set(config.trusted());
+    let _ = NAME_LISTEN.set(config.name_listen());
 
     let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
         Ok(runtime) => runtime,
@@ -238,6 +241,16 @@ async fn serve() -> std::io::Result<()> {
                 LAST_ACTIVE.store(now(), Ordering::SeqCst);
                 let acceptor = acceptor.clone();
                 tokio::spawn(async move {
+                    // With `name_listen = armed`, the name's doors are only open to other devices while Corral is
+                    // on: otherwise the connection closes before a byte is exchanged, as if the port were closed
+                    let name_door = matches!(door, Door::Redirect | Door::Https);
+                    if name_door
+                        && NAME_LISTEN.get() == Some(&NameListen::Armed)
+                        && !peer.to_canonical().is_loopback()
+                        && !armed().await
+                    {
+                        return;
+                    }
                     let http = hyper::server::conn::http1::Builder::new();
                     match (door, acceptor) {
                         (Door::Redirect, _) => {
