@@ -6,6 +6,7 @@ use serde_json::{Value, json};
 
 use crate::config::{Config, GpuLimits};
 use crate::helpers::{self, Kind};
+use crate::http;
 use crate::look::{self, BOLD, DIM, GREEN, RED, RESET, YELLOW};
 use crate::router::{self, Model};
 use crate::system::{GpuMemoryKind, Snapshot, Usage};
@@ -385,7 +386,7 @@ fn gather_helpers() -> Vec<HelperStatus> {
             };
             let state = if running {
                 match &helper.kind {
-                    Kind::Llama { .. } => match router::get_json(helper.internal_port, "/props") {
+                    Kind::Llama { .. } => match http::get_json(helper.internal_port, "/props") {
                         Some(props) if props["is_sleeping"] == true => HelperState::Sleeping,
                         Some(_) => HelperState::Loaded,
                         None => HelperState::Starting,
