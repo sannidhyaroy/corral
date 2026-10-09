@@ -38,6 +38,8 @@ pub fn sections(text: &str) -> Vec<(String, Config)> {
 pub const DEFAULT_GATE_PORT: u16 = 24937;
 /// llama.cpp's router, reachable only from this machine.
 pub const DEFAULT_ROUTER_PORT: u16 = 18080;
+/// The address the custom name points to: `127.0.'a'.'i'`, leaving 127.0.0.1's ports 80 and 443 to other software.
+pub const DEFAULT_NAME_ADDRESS: &str = "127.0.97.105";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GpuLimits {
@@ -123,6 +125,32 @@ impl Config {
     /// The web front's own HTTPS name (`name`), such as `corral.example`; none unless set.
     pub fn name(&self) -> Option<&str> {
         self.get("name")
+    }
+
+    /// The local address the custom name points to (`name_address`).
+    pub fn name_address(&self) -> &str {
+        self.get("name_address").unwrap_or(DEFAULT_NAME_ADDRESS)
+    }
+
+    /// Whether the gate listens on every address (`listen = all`) instead of only this machine's (`local`, the
+    /// default). Without API keys, every device on those networks can use the models and the router's tools.
+    pub fn listen_on_all(&self) -> bool {
+        self.get("listen") == Some("all")
+    }
+
+    /// How many models the router keeps loaded at once (`models_max`, default 1).
+    pub fn models_max(&self) -> u32 {
+        self.get("models_max")
+            .and_then(|value| value.parse().ok())
+            .filter(|&n| n > 0)
+            .unwrap_or(1)
+    }
+
+    /// Extra llama-server options for the router (`router_options`), passed through as written.
+    pub fn router_options(&self) -> Vec<String> {
+        self.get("router_options")
+            .map(|options| options.split_whitespace().map(str::to_owned).collect())
+            .unwrap_or_default()
     }
 
     /// The guard's limits for GPU memory in bytes: a warning at `gpu_warn`, unloading the model at `gpu_unload`
