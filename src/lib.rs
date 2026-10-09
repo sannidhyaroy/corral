@@ -10,5 +10,6 @@ pub mod router;
 pub mod status;
 pub mod system;
 pub mod systemd;
+pub mod thinking;
 pub mod units;
 pub mod web;
