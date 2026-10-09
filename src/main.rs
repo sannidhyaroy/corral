@@ -1,6 +1,8 @@
+use std::io;
 use std::process::ExitCode;
 
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
+use clap_complete::Shell;
 
 /// Herd and serve your llama.cpp models, on demand and behind one gate.
 #[derive(Parser)]
@@ -22,23 +24,27 @@ enum Command {
     /// Follow the servers' logs
     #[command(visible_alias = "lg")]
     Logs,
-    /// The web front, started by systemd on the gate's sockets
-    #[command(hide = true)]
-    Web,
-    /// The guard, started by systemd alongside the model router
-    #[command(hide = true)]
-    Guard,
+    /// Print the completion script for a shell
+    Completions { shell: Shell },
 }
 
 fn main() -> ExitCode {
+    // The daemons are started by systemd, not typed, so they stay out of help and completions
+    if let Some("web" | "guard") = std::env::args().nth(1).as_deref() {
+        eprintln!("corral daemons: not implemented yet");
+        return ExitCode::FAILURE;
+    }
+
     let cli = Cli::parse();
     let name = match cli.command.unwrap_or(Command::Status) {
+        Command::Completions { shell } => {
+            clap_complete::generate(shell, &mut Cli::command(), "corral", &mut io::stdout());
+            return ExitCode::SUCCESS;
+        }
         Command::On => "on",
         Command::Off => "off",
         Command::Status => "status",
         Command::Logs => "logs",
-        Command::Web => "web",
-        Command::Guard => "guard",
     };
     eprintln!("corral {name}: not implemented yet");
     ExitCode::FAILURE
