@@ -2,6 +2,7 @@
 //! than once, the last one counts.
 
 use std::collections::HashMap;
+use std::net::IpAddr;
 use std::path::PathBuf;
 use std::{env, fs};
 
@@ -50,6 +51,42 @@ pub struct GpuLimits {
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // positive GiB values, far below u64::MAX
 fn gib_to_bytes(gib: f64) -> u64 {
     (gib * f64::from(1 << 30)) as u64
+}
+
+/// An address or a range in CIDR notation, such as `100.64.0.0/10` or `fd7a:115c:a1e0::/48`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AddressRange {
+    address: IpAddr,
+    prefix: u8,
+}
+
+impl AddressRange {
+    pub fn parse(text: &str) -> Option<Self> {
+        let (address, prefix) = text.split_once('/').map_or((text, None), |(a, p)| (a, Some(p)));
+        let address: IpAddr = address.trim().parse().ok()?;
+        let longest = if address.is_ipv4() { 32 } else { 128 };
+        let prefix = match prefix {
+            Some(prefix) => prefix.trim().parse().ok().filter(|&p| p <= longest)?,
+            None => longest,
+        };
+        Some(Self { address, prefix })
+    }
+
+    /// Whether `ip` is in the range. IPv4 clients of a dual-stack socket arrive as `::ffff:a.b.c.d` and count as
+    /// their IPv4 address.
+    pub fn contains(&self, ip: IpAddr) -> bool {
+        match (self.address, ip.to_canonical()) {
+            (IpAddr::V4(range), IpAddr::V4(ip)) => {
+                let mask = u32::MAX.checked_shl(32 - u32::from(self.prefix)).unwrap_or(0);
+                u32::from(range) & mask == u32::from(ip) & mask
+            }
+            (IpAddr::V6(range), IpAddr::V6(ip)) => {
+                let mask = u128::MAX.checked_shl(128 - u32::from(self.prefix)).unwrap_or(0);
+                u128::from(range) & mask == u128::from(ip) & mask
+            }
+            _ => false,
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -154,6 +191,16 @@ impl Config {
             .unwrap_or(1)
     }
 
+    /// Address ranges treated like this machine itself (`trusted`): no key needed, the router's tools allowed. Safe
+    /// for Tailscale's `100.64.0.0/10`, whose addresses belong to each device's key; not for a home Wi-Fi, where any
+    /// device that joins can get an address. Entries that aren't addresses or ranges are skipped.
+    pub fn trusted(&self) -> Vec<AddressRange> {
+        self.list("trusted")
+            .iter()
+            .filter_map(|entry| AddressRange::parse(entry))
+            .collect()
+    }
+
     /// Extra llama-server options for the router (`router_options`), passed through as written.
     pub fn router_options(&self) -> Vec<String> {
         self.get("router_options")
@@ -255,5 +302,20 @@ empty =
                 unload: 95 * GIB
             }
         );
+    }
+
+    #[test]
+    fn trusted_ranges() {
+        let config = Config::parse("trusted = 100.64.0.0/10, 192.168.1.7, fd7a:115c:a1e0::/48, not-an-address");
+        let ranges = config.trusted();
+        assert_eq!(ranges.len(), 3);
+        let trusted = |ip: &str| ranges.iter().any(|range| range.contains(ip.parse().unwrap()));
+        assert!(trusted("100.64.209.31"));
+        assert!(trusted("::ffff:100.101.2.3"));
+        assert!(!trusted("100.128.0.1"));
+        assert!(trusted("192.168.1.7"));
+        assert!(!trusted("192.168.1.8"));
+        assert!(trusted("fd7a:115c:a1e0::1234"));
+        assert!(Config::parse("trusted = 0.0.0.0/0").trusted()[0].contains("8.8.8.8".parse().unwrap()));
     }
 }
