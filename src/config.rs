@@ -57,6 +57,13 @@ impl Config {
         self.values.get(key).map(String::as_str)
     }
 
+    /// Every key and its value, sorted by key.
+    pub fn entries(&self) -> impl Iterator<Item = (&str, &str)> {
+        let mut entries: Vec<(&str, &str)> = self.values.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        entries.sort_unstable();
+        entries.into_iter()
+    }
+
     /// `yes`/`no` (also `true`/`false`, `on`/`off`, `1`/`0`); anything else gives the default.
     pub fn flag(&self, key: &str, default: bool) -> bool {
         match self.get(key).map(str::to_ascii_lowercase).as_deref() {
