@@ -1,10 +1,9 @@
 //! Corral's systemd units, generated from `corral.conf` and `helpers.ini` so ports, paths and helpers always match
 //! the settings. Nothing here writes files; `corral install` does.
 //!
-//! - User units: `corral.target` (armed), the gate (`corral-router.socket` → `-proxy` → `corral-router.service`),
-//!   the guard, and each helper's socket, proxy and server.
-//! - System units, only with a custom `name`: `corral-web.socket` holds ports 80 and 443 on the name's address and
-//!   starts `corral web` as the user.
+//! - User units: `corral.target` (armed), the router, the guard, and each helper's socket, proxy and server.
+//! - `corral web` and its socket, which holds every door: user units, or with a custom `name` system units that also
+//!   hold the name's ports 80 and 443 and run `corral web` as the user.
 
 use std::fmt::Write;
 
@@ -65,27 +64,15 @@ fn listen_lines(port: u16, all: bool) -> String {
 
 pub fn user_units(context: &Context) -> Vec<Unit> {
     let config = context.config;
-    let (gate, router) = (config.gate_port(), config.router_port());
-    let mut units = vec![
-        unit(
-            "corral.target",
-            "[Unit]\nDescription=Corral: armed (servers start on their first request and stop after idle)\n\
-             Wants=corral-router.socket\n"
-                .to_owned(),
-        ),
-        unit(
-            "corral-router.socket",
-            format!(
-                "[Unit]\nDescription=Corral: the gate (port {gate})\nPartOf=corral.target\n\n[Socket]\n{}\
-                 Service=corral-router-proxy.service\n",
-                listen_lines(gate, config.listen_on_all())
-            ),
-        ),
-        unit(
-            "corral-router-proxy.service",
-            proxy("router", "corral-router.service", router, context),
-        ),
-    ];
+    let router = config.router_port();
+    // Active while Corral is armed; `corral web` starts the router on the first request and stops it after idle
+    let mut units = vec![unit(
+        "corral.target",
+        "[Unit]\nDescription=Corral: armed (the router starts on the first request and stops after idle)\n".to_owned(),
+    )];
+    if config.name().is_none() {
+        units.extend(web_units(context));
+    }
 
     let mut router_command = vec![
         context.llama_server.clone(),
@@ -104,7 +91,7 @@ pub fn user_units(context: &Context) -> Vec<Unit> {
     units.push(unit(
         "corral-router.service",
         format!(
-            "[Unit]\nDescription=Corral: model router (llama-server on 127.0.0.1:{router})\nStopWhenUnneeded=yes\n\
+            "[Unit]\nDescription=Corral: model router (llama-server on 127.0.0.1:{router})\n\
              PartOf=corral.target\nWants=corral-guard.service\n\n[Service]\nExecStart={}\n\
              ExecStartPost={} ready {router}\nTimeoutStartSec=60\n",
             command(&router_command),
@@ -172,32 +159,49 @@ fn helper_units(helper: &Helper, context: &Context) -> [Unit; 3] {
     ]
 }
 
-/// The web front's system units, only when a custom `name` is set.
+/// The web front's system units, only with a custom `name` (they bind its ports 80 and 443, which needs root).
 pub fn system_units(context: &Context) -> Vec<Unit> {
-    let Some(name) = context.config.name() else {
-        return Vec::new();
-    };
-    let address = context.config.name_address();
-    let mut service = format!(
-        "[Unit]\nDescription=Corral web front for https://{name} (exits after 5 idle minutes)\n\
-         Requires=corral-web.socket\n\n[Service]\nUser={}\nGroup={}\nExecStart={} web\n",
-        context.user,
-        context.group,
-        quote(&context.corral)
+    if context.config.name().is_some() {
+        web_units(context)
+    } else {
+        Vec::new()
+    }
+}
+
+/// `corral web` and the socket that holds every door: the gate port always, and with a custom name its ports 80 and
+/// 443 too. Without a name these are user units; with one, system units that run `corral web` as the user. The socket
+/// stays open while Corral is off, so the gate answers "off" instead of refusing.
+pub fn web_units(context: &Context) -> Vec<Unit> {
+    let config = context.config;
+    let gate = config.gate_port();
+    let mut doors = listen_lines(gate, config.listen_on_all());
+    if config.name().is_some() {
+        let address = config.name_address();
+        let _ = write!(doors, "ListenStream={address}:80\nListenStream={address}:443\n");
+    }
+    let description = config.name().map_or_else(
+        || format!("the gate (port {gate})"),
+        |name| format!("the gate (port {gate}) and https://{name}"),
     );
+
+    let mut service =
+        format!("[Unit]\nDescription=Corral web front: {description}\nRequires=corral-web.socket\n\n[Service]\n");
+    if config.name().is_some() {
+        let _ = writeln!(service, "User={}\nGroup={}", context.user, context.group);
+    }
+    let _ = writeln!(service, "ExecStart={} web", quote(&context.corral));
     if let Some(config_home) = &context.config_home {
         let _ = writeln!(service, "Environment=XDG_CONFIG_HOME={}", quote(config_home));
     }
-    service.push_str(
-        "NoNewPrivileges=yes\nCapabilityBoundingSet=\nProtectSystem=strict\nProtectHome=read-only\nPrivateTmp=yes\n\
-         PrivateDevices=yes\nRestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX\n",
-    );
+    service.push_str("NoNewPrivileges=yes\nPrivateTmp=yes\nRestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX\n");
+    if config.name().is_some() {
+        service.push_str("CapabilityBoundingSet=\nProtectSystem=strict\nProtectHome=read-only\nPrivateDevices=yes\n");
+    }
     vec![
         unit(
             "corral-web.socket",
             format!(
-                "[Unit]\nDescription=Corral web front: https://{name}\n\n[Socket]\nListenStream={address}:80\n\
-                 ListenStream={address}:443\n\n[Install]\nWantedBy=sockets.target\n"
+                "[Unit]\nDescription=Corral: {description}\n\n[Socket]\n{doors}\n[Install]\nWantedBy=sockets.target\n"
             ),
         ),
         unit("corral-web.service", service),
@@ -233,11 +237,12 @@ mod tests {
     fn the_gate_is_local_unless_set_to_all() {
         let local = Config::parse("");
         let units = user_units(&context(&local, &[]));
-        assert!(
-            find(&units, "corral-router.socket").contains("ListenStream=127.0.0.1:24937\nListenStream=[::1]:24937")
-        );
+        let socket = find(&units, "corral-web.socket");
+        assert!(socket.contains("ListenStream=127.0.0.1:24937\nListenStream=[::1]:24937"));
+        assert!(!units.iter().any(|unit| unit.name == "corral-router.socket"));
+        assert!(!find(&units, "corral-web.service").contains("User="));
         let all = Config::parse("listen = all\ngate_port = 9000");
-        assert!(find(&user_units(&context(&all, &[])), "corral-router.socket").contains("ListenStream=9000\n"));
+        assert!(find(&user_units(&context(&all, &[])), "corral-web.socket").contains("ListenStream=9000\n"));
     }
 
     #[test]
@@ -273,7 +278,14 @@ mod tests {
         assert!(system_units(&context(&config, &[])).is_empty());
         let named = Config::parse("name = corral.example");
         let units = system_units(&context(&named, &[]));
-        assert!(find(&units, "corral-web.socket").contains("ListenStream=127.0.97.105:443"));
+        let socket = find(&units, "corral-web.socket");
+        assert!(socket.contains("ListenStream=127.0.0.1:24937\nListenStream=[::1]:24937\n"));
+        assert!(socket.contains("ListenStream=127.0.97.105:80\nListenStream=127.0.97.105:443"));
+        assert!(
+            !user_units(&context(&named, &[]))
+                .iter()
+                .any(|unit| unit.name.starts_with("corral-web"))
+        );
         assert!(
             find(&units, "corral-web.service").contains("User=me\nGroup=me\nExecStart=/home/me/.local/bin/corral web")
         );
