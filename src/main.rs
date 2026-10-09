@@ -41,6 +41,8 @@ enum Command {
     /// Follow the servers' logs
     #[command(visible_alias = "lg")]
     Logs,
+    /// List the presets in models.ini with how each one thinks
+    Models,
     /// Print the completion script for a shell
     Completions { shell: Shell },
     /// Install or upgrade Corral: this program, its systemd units and starter settings
@@ -102,6 +104,7 @@ fn main() -> ExitCode {
         Command::Off => off(),
         Command::Status { json } => status(json),
         Command::Logs => logs(),
+        Command::Models => models(),
         Command::Completions { shell } => {
             clap_complete::generate(shell, &mut Cli::command(), "corral", &mut io::stdout());
             ExitCode::SUCCESS
@@ -249,6 +252,35 @@ fn off() -> ExitCode {
         return ExitCode::FAILURE;
     }
     println!("Corral disarmed. Nothing is listening and nothing will start.");
+    ExitCode::SUCCESS
+}
+
+fn models() -> ExitCode {
+    let config = Config::load();
+    let presets = corral::presets::load();
+    if presets.is_empty() {
+        println!("No presets in models.ini yet.");
+        return ExitCode::SUCCESS;
+    }
+    let width = presets
+        .iter()
+        .map(|preset| preset.id.chars().count())
+        .max()
+        .unwrap_or(0);
+    let alias_width = presets
+        .iter()
+        .map(|preset| preset.alias.as_deref().map_or(0, |alias| alias.chars().count()))
+        .max()
+        .unwrap_or(0);
+    for preset in &presets {
+        let thinking = preset.abilities(&config).map_or_else(
+            |error| format!("? ({error})"),
+            |abilities| abilities.describe().to_owned(),
+        );
+        let alias = preset.alias.as_deref().unwrap_or("");
+        let pad = |text: &str, columns: usize| format!("{text}{}", " ".repeat(columns - text.chars().count()));
+        println!("  {}  {}  {thinking}", pad(&preset.id, width), pad(alias, alias_width));
+    }
     ExitCode::SUCCESS
 }
 
