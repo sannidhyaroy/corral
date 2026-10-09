@@ -49,9 +49,9 @@
 - [x] llama.cpp's web UI at `http://ai.localhost:24937`, renamed to Corral
 - [x] Your own name with HTTPS, with a friendly page and an **Open the gate** button while Corral is off
 - [x] Reachable from your own devices on the networks you allow, when you choose to
+- [x] API keys for other devices, created and revoked with `corral key`; the router's tools stay on this machine unless a key allows them
+- [x] One gate for every door, answering "Corral is off" instead of refusing connections
 - [ ] Bring your own certificate or CA for that name, or let Corral create one
-- [ ] API keys for other devices, created and revoked with `corral key`
-- [ ] One process for every door, answering "Corral is off" instead of refusing connections
 
 ### Presets
 - [x] Every model and its settings as a named preset in one `models.ini` (context size, speculative decoding, sampling, thinking on or off)
@@ -81,16 +81,15 @@
 
 ```mermaid
 flowchart TD
-    browser["Browsers<br/>your own HTTPS name (optional)"] --> web["corral web<br/>TLS · renamed web UI · off page"]
-    apps["Apps, editors, other devices<br/>ai.localhost:24937"] --> gate["Gate<br/>systemd socket, open only while armed"]
-    web --> gate
-    gate --> router["llama.cpp router<br/>internal port"]
+    apps["Apps, editors, other devices<br/>ai.localhost:24937"] --> web["corral web: the gate<br/>keys · off page · renamed web UI"]
+    browser["Browsers<br/>your own HTTPS name (optional)"] --> web
+    web --> router["llama.cpp router<br/>internal port, this machine only"]
     router --> model["One model at a time<br/>presets from models.ini"]
     router -.- guard["corral guard<br/>GPU memory · cache · helpers"]
     editors["Editors and other tools<br/>e.g. sweep.localhost:8081"] --> helper["Helpers<br/>one small model each, from helpers.ini"]
 ```
 
-systemd holds every port. Programs start when the first request arrives and exit when idle, so an armed Corral that nobody uses costs nothing but a few open sockets. Corral is one program: the command line, the guard (`corral guard`) and the web front (`corral web`) are the same binary.
+Every request passes one gate, `corral web`, which decides who may do what before anything starts. systemd holds its ports; the gate starts when the first request arrives, starts the router while Corral is armed, stops the router after 15 idle minutes and then exits itself. An armed Corral that nobody uses costs nothing but a few open sockets. Corral is one program: the command line, the gate (`corral web`) and the guard (`corral guard`) are the same binary.
 
 ---
 
@@ -160,10 +159,12 @@ systemd holds every port. Programs start when the first request arrives and exit
 | `corral logs`, `corral lg` | Follow the logs of every Corral unit |
 | `corral install`, `--dry-run` | Install or upgrade; with `--dry-run`, only show what would change |
 | `corral uninstall`, `--purge` | Remove Corral; with `--purge`, your settings and backups too |
+| `corral key add <device>`, `--allow tools` | Make an API key for another device, shown once; `--allow tools` also lets it use the router's tools |
+| `corral key list`, `corral key revoke <device>` | List the devices with keys; end one, effective on its next request |
 | `corral completions <shell>` | Print the completion script for bash, zsh, fish, elvish or PowerShell |
 | `corral help`, `-h`, `--help` | The same list, from the command line |
 
-Point any OpenAI-compatible app at `http://ai.localhost:24937/v1` and pick a preset by its name.
+Point any OpenAI-compatible app at `http://ai.localhost:24937/v1` and pick a preset by its name. On other devices, use your machine's address and a key from `corral key add`, sent as the API key (`Authorization: Bearer <key>`).
 
 ---
 
@@ -178,6 +179,7 @@ Everything lives in `~/.config/corral/` (or `$XDG_CONFIG_HOME/corral/`):
 | `helpers.ini` | The [helpers](#helpers) |
 | `ui.json` | Default web UI settings for browsers that have none saved yet (optional) |
 | `tls/` | `fullchain.pem` and `privkey.pem` for your custom name (optional) |
+| `api-keys` | Your devices' API keys, as hashes only; managed with `corral key` |
 
 The settings in `corral.conf`, one `key = value` per line:
 
@@ -185,7 +187,8 @@ The settings in `corral.conf`, one `key = value` per line:
 |---|---|---|
 | `gate_port` | `24937` | Where apps reach Corral |
 | `router_port` | `18080` | Where llama.cpp's router listens, on this machine only |
-| `listen` | `local` | `all` lets every network your firewall allows reach the gate |
+| `listen` | `local` | `all` lets every network your firewall allows reach the gate; other devices then need a key |
+| `trusted` | | Addresses or ranges treated like this machine: no key needed, tools allowed (see [Security](#security)) |
 | `models_max` | `1` | How many models the router keeps loaded at once |
 | `router_options` | | Extra llama-server options for the router (`llama-server --help` lists them all) |
 | `exclusive` | | Presets that need the whole GPU; helpers step aside while one loads |
@@ -228,8 +231,11 @@ port = 8082
 
 ## Security
 
-- By default, only this machine can reach the gate. With `listen = all`, every network your firewall allows can, and there are no API keys yet: anyone on those networks can use your models.
-- llama.cpp's built-in tools (`--tools` in `router_options`) run on the machine that serves them, whichever device asks. Enable them only if you trust everyone who can reach the gate.
+- By default, only this machine can reach the gate. With `listen = all`, every network your firewall allows can, and other devices need an API key for anything beyond the page itself. Keys are stored as hashes only, shown once when made, and revoked keys stop working on their next request.
+- llama.cpp's built-in tools (`--tools` in `router_options`) act on the machine that serves them, whichever device asks. Only this machine, `trusted` addresses and keys made with `--allow tools` may use them, and a browser's first visit starts with them unchecked.
+- `trusted` addresses skip the key. That's safe for Tailscale (`100.64.0.0/10`), whose addresses belong to each device's own key, and not for a home Wi-Fi, where any device that joins can get an address.
+- Requests the gate refuses never start the router, so a stranger can't load a model or touch your GPU. Keys are taken off requests before they reach the router.
+- The gate speaks plain HTTP. Over Tailscale that's encrypted; on a Wi-Fi network, a key travels as safely as the network itself, so use your HTTPS name where you can.
 - The web UI defaults (`ui.json`) are sent to every visitor, so they must never contain API keys.
 - With a custom name, `corral install` adds one line to `/etc/hosts`, marked `# Corral`, and only ever appends. Corral never removes lines from that file: `corral uninstall` tells you which line to remove yourself.
 
