@@ -2,10 +2,11 @@
 
 use std::fmt::Write;
 
-use crate::config::{Config, GpuLimits};
-use crate::look::{self, BOLD, DIM, GREEN, RED, RESET, YELLOW};
 use serde_json::{Value, json};
 
+use crate::config::{Config, GpuLimits};
+use crate::helpers::{self, Kind};
+use crate::look::{self, BOLD, DIM, GREEN, RED, RESET, YELLOW};
 use crate::router::{self, Model};
 use crate::system::{GpuMemoryKind, Snapshot, Usage};
 use crate::systemd;
@@ -38,12 +39,66 @@ pub enum Router {
     Running(Vec<Model>),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HelperState {
+    Off,
+    /// Armed; its server starts on the first request.
+    Waiting,
+    /// Running but not answering yet.
+    Starting,
+    /// A llama helper with its model in memory.
+    Loaded,
+    /// A llama helper that unloaded its model after being idle; the next request reloads it.
+    Sleeping,
+    /// A custom helper's server is running.
+    Running,
+}
+
+impl HelperState {
+    fn label(self, armed: bool) -> &'static str {
+        match self {
+            Self::Off if armed => "not armed",
+            Self::Off => "off",
+            Self::Waiting => "waiting for a request",
+            Self::Starting => "starting",
+            Self::Loaded => "model loaded",
+            Self::Sleeping => "model sleeping",
+            Self::Running => "running",
+        }
+    }
+
+    fn key(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Waiting => "waiting",
+            Self::Starting => "starting",
+            Self::Loaded => "loaded",
+            Self::Sleeping => "sleeping",
+            Self::Running => "running",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HelperStatus {
+    pub name: String,
+    pub port: u16,
+    pub state: HelperState,
+}
+
+impl HelperStatus {
+    fn address(&self) -> String {
+        format!("{}.localhost:{}", self.name, self.port)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Status {
     pub armed: bool,
     pub gate_port: u16,
     pub router: Router,
     pub guard_running: bool,
+    pub helpers: Vec<HelperStatus>,
     pub system: Snapshot,
     pub gpu_limits: Option<GpuLimits>,
 }
@@ -69,6 +124,7 @@ impl Status {
             gate_port: config.gate_port(),
             router,
             guard_running,
+            helpers: gather_helpers(),
             system,
             gpu_limits,
         }
@@ -103,6 +159,14 @@ impl Status {
             );
         }
         out.push('\n');
+        for helper in &self.helpers {
+            let label = helper.state.label(self.armed);
+            let line = match helper.state {
+                HelperState::Off => format!("{DIM}{label}{RESET}"),
+                _ => format!("{label} {DIM}· {}{RESET}", helper.address()),
+            };
+            let _ = writeln!(out, "  {:<7}{line}", helper.name);
+        }
         out.push_str(&self.render_system_fancy());
         out
     }
@@ -248,6 +312,11 @@ impl Status {
             "gate": format!("http://ai.localhost:{}", self.gate_port),
             "router": {"state": router, "models": models},
             "guard": if self.guard_running { "running" } else { "stopped" },
+            "helpers": self.helpers.iter().map(|helper| json!({
+                "name": helper.name,
+                "address": format!("http://{}", helper.address()),
+                "state": helper.state.key(),
+            })).collect::<Vec<_>>(),
             "gpu_memory": gpu_memory,
             "ram": usage(system.ram),
             "swap": usage(system.swap),
@@ -278,6 +347,15 @@ impl Status {
         };
         let address = format!("ai.localhost:{}", self.gate_port);
         let _ = writeln!(out, "  {:<8} {address:<22} {router}", "Models");
+        for helper in &self.helpers {
+            let _ = writeln!(
+                out,
+                "  {:<8} {:<22} {}",
+                helper.name,
+                helper.address(),
+                helper.state.label(self.armed)
+            );
+        }
         if self.guard_running {
             let _ = writeln!(out, "  {:<8} watching", "Guard");
         } else if matches!(self.router, Router::Running(_) | Router::Starting) {
@@ -293,6 +371,39 @@ impl Status {
         out.push_str(&render_system(&self.system));
         out
     }
+}
+
+/// Each helper's state: its units, and for llama helpers whether the model is loaded or asleep (asked on the
+/// helper's own port, so a stopped helper isn't started).
+fn gather_helpers() -> Vec<HelperStatus> {
+    let (helpers, _) = helpers::load();
+    helpers
+        .iter()
+        .map(|helper| {
+            let [socket, running] = systemd::active(&[helper.socket_unit(), helper.service_unit()])[..] else {
+                unreachable!("systemd::active returns one state per unit")
+            };
+            let state = if running {
+                match &helper.kind {
+                    Kind::Llama { .. } => match router::get_json(helper.internal_port, "/props") {
+                        Some(props) if props["is_sleeping"] == true => HelperState::Sleeping,
+                        Some(_) => HelperState::Loaded,
+                        None => HelperState::Starting,
+                    },
+                    Kind::Custom { .. } => HelperState::Running,
+                }
+            } else if socket {
+                HelperState::Waiting
+            } else {
+                HelperState::Off
+            };
+            HelperStatus {
+                name: helper.name.clone(),
+                port: helper.port,
+                state,
+            }
+        })
+        .collect()
 }
 
 fn render_system(system: &Snapshot) -> String {
@@ -425,6 +536,7 @@ mod tests {
                 state: "loaded".to_owned(),
             }]),
             guard_running: true,
+            helpers: Vec::new(),
             system: machine(),
             gpu_limits: None,
         };
@@ -449,6 +561,7 @@ mod tests {
             gate_port: 24937,
             router: Router::Waiting,
             guard_running: false,
+            helpers: Vec::new(),
             system: Snapshot::default(),
             gpu_limits: None,
         };
@@ -464,6 +577,7 @@ mod tests {
             gate_port: 24937,
             router: Router::Off,
             guard_running: false,
+            helpers: Vec::new(),
             system: machine(),
             gpu_limits: Some(GpuLimits {
                 warn: 20 * GIB,
@@ -501,6 +615,7 @@ mod tests {
             gate_port: 24937,
             router: Router::Waiting,
             guard_running: false,
+            helpers: Vec::new(),
             system: machine(),
             gpu_limits: Some(GpuLimits {
                 warn: 20 * GIB,
@@ -513,5 +628,28 @@ mod tests {
         assert_eq!(json["gpu_memory"]["warn"], 20 * GIB);
         assert_eq!(json["temperature"]["gpu"], 91.0);
         assert_eq!(json["power"]["profile"], "balanced");
+    }
+
+    #[test]
+    fn helpers_are_listed() {
+        let status = Status {
+            armed: true,
+            gate_port: 24937,
+            router: Router::Waiting,
+            guard_running: false,
+            helpers: vec![HelperStatus {
+                name: "sweep".to_owned(),
+                port: 8081,
+                state: HelperState::Sleeping,
+            }],
+            system: Snapshot::default(),
+            gpu_limits: None,
+        };
+        assert!(
+            status
+                .render_plain()
+                .contains("  sweep    sweep.localhost:8081   model sleeping")
+        );
+        assert_eq!(status.to_json()["helpers"][0]["state"], "sleeping");
     }
 }

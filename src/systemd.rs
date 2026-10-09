@@ -46,10 +46,10 @@ fn systemctl(verb: &str, units: &[impl AsRef<str>]) -> Result<(), String> {
 }
 
 /// Whether each unit is active, in the order given. If systemd can't be asked, none is.
-pub fn active(units: &[&str]) -> Vec<bool> {
+pub fn active(units: &[impl AsRef<str>]) -> Vec<bool> {
     let output = Command::new("systemctl")
         .args(["--user", "is-active"])
-        .args(units)
+        .args(units.iter().map(AsRef::as_ref))
         .output();
     let mut states: Vec<bool> = output
         .map(|output| {
