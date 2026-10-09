@@ -124,13 +124,7 @@ fn save(entries: &[Entry]) -> Result<(), String> {
 
 /// Makes a key for `device` and returns it; it's never stored and can't be shown again.
 pub fn add(device: &str, allow_tools: bool) -> Result<String, String> {
-    let valid = !device.is_empty()
-        && device
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.');
-    if !valid {
-        return Err("device names may only use letters, digits, dashes, underscores and dots".to_owned());
-    }
+    check_name(device)?;
     let mut entries = load();
     if entries.iter().any(|entry| entry.device == device) {
         return Err(format!(
@@ -145,6 +139,33 @@ pub fn add(device: &str, allow_tools: bool) -> Result<String, String> {
     });
     save(&entries)?;
     Ok(key)
+}
+
+fn check_name(device: &str) -> Result<(), String> {
+    let valid = !device.is_empty()
+        && device
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.');
+    if valid {
+        Ok(())
+    } else {
+        Err("device names may only use letters, digits, dashes, underscores and dots".to_owned())
+    }
+}
+
+/// Gives `device`'s key a new name; the key itself stays the same, so the device needs nothing new.
+pub fn rename(device: &str, new_name: &str) -> Result<(), String> {
+    check_name(new_name)?;
+    let mut entries = load();
+    if entries.iter().any(|entry| entry.device == new_name) {
+        return Err(format!("`{new_name}` already has a key"));
+    }
+    let entry = entries
+        .iter_mut()
+        .find(|entry| entry.device == device)
+        .ok_or_else(|| format!("`{device}` has no key"))?;
+    new_name.clone_into(&mut entry.device);
+    save(&entries)
 }
 
 /// Removes `device`'s key; false if it had none.

@@ -72,6 +72,13 @@ enum KeyCommand {
     },
     /// List the devices that have a key
     List,
+    /// Give a device's key a new name; the key itself stays the same
+    Rename {
+        /// The device's current name
+        device: String,
+        /// Its new name
+        new_name: String,
+    },
     /// Revoke a device's key; it stops working on its next request
     Revoke {
         /// The device's name
@@ -292,6 +299,16 @@ fn key(command: KeyCommand) -> ExitCode {
             }
             ExitCode::SUCCESS
         }
+        KeyCommand::Rename { device, new_name } => match keys::rename(&device, &new_name) {
+            Ok(()) => {
+                println!("`{device}` is now `{new_name}`; its key stays the same.");
+                ExitCode::SUCCESS
+            }
+            Err(error) => {
+                eprintln!("corral: {error}");
+                ExitCode::FAILURE
+            }
+        },
         KeyCommand::Revoke { device } => match keys::revoke(&device) {
             Ok(true) => {
                 println!("`{device}`'s key is revoked.");
