@@ -3,6 +3,8 @@ use std::process::ExitCode;
 
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::Shell;
+use corral::config::Config;
+use corral::status::Status;
 
 /// Herd and serve your llama.cpp models, on demand and behind one gate.
 #[derive(Parser)]
@@ -41,9 +43,12 @@ fn main() -> ExitCode {
             clap_complete::generate(shell, &mut Cli::command(), "corral", &mut io::stdout());
             return ExitCode::SUCCESS;
         }
+        Command::Status => {
+            print!("{}", Status::gather(&Config::load()).render_plain());
+            return ExitCode::SUCCESS;
+        }
         Command::On => "on",
         Command::Off => "off",
-        Command::Status => "status",
         Command::Logs => "logs",
     };
     eprintln!("corral {name}: not implemented yet");
