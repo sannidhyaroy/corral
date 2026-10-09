@@ -229,6 +229,14 @@ pub fn plan(places: &Places, completion: Vec<u8>) -> Plan {
     }
 
     actions.extend(name_actions(&context, places, &mut notes));
+    if config.name().is_none() {
+        for unit in ["corral-web.socket", "corral-web.service"] {
+            let path = places.system_units.join(unit);
+            if path.exists() {
+                actions.push(removal(path, true));
+            }
+        }
+    }
     Plan {
         actions,
         folders: Vec::new(),
@@ -290,6 +298,10 @@ fn name_actions(context: &Context, places: &Places, notes: &mut Vec<String>) -> 
     actions
 }
 
+fn is_unit(name: &str) -> bool {
+    name.ends_with(".service") || name.ends_with(".socket") || name.ends_with(".target")
+}
+
 /// The Corral unit files in a folder.
 fn installed_units(dir: &Path) -> Vec<String> {
     let mut found: Vec<String> = fs::read_dir(dir)
@@ -297,10 +309,7 @@ fn installed_units(dir: &Path) -> Vec<String> {
         .flatten()
         .flatten()
         .map(|entry| entry.file_name().to_string_lossy().into_owned())
-        .filter(|name| {
-            name.starts_with("corral")
-                && (name.ends_with(".service") || name.ends_with(".socket") || name.ends_with(".target"))
-        })
+        .filter(|name| name.starts_with("corral") && is_unit(name))
         .collect();
     found.sort();
     found
@@ -362,22 +371,31 @@ pub fn apply(plan: &Plan, places: &Places, purpose: Purpose) -> Result<Option<Pa
         }
     }
 
-    let system_changes = plan
-        .actions
-        .iter()
-        .any(|action| action.system && action.change != Change::Keep);
-    if system_changes && purpose != Purpose::Install {
-        run(
-            &[
-                "systemctl",
-                "disable",
-                "--now",
-                "corral-web.socket",
-                "corral-web.service",
-            ],
-            true,
-        )?;
+    // Units on their way out are stopped first, so their ports are free for the units replacing them
+    let unit_name = |action: &&Action| -> Option<String> {
+        let name = action.path.file_name()?.to_string_lossy().into_owned();
+        is_unit(&name).then_some(name)
+    };
+    let leaving = |system: bool| -> Vec<String> {
+        plan.actions
+            .iter()
+            .filter(|action| action.system == system && action.change == Change::Remove)
+            .filter_map(|action| unit_name(&action))
+            .collect()
+    };
+    for (system, units) in [(false, leaving(false)), (true, leaving(true))] {
+        if !units.is_empty() {
+            let mut words = vec!["systemctl"];
+            if !system {
+                words.push("--user");
+            }
+            words.extend(["disable", "--now"]);
+            words.extend(units.iter().map(String::as_str));
+            // A unit that never ran can't be stopped; that's fine
+            let _ = run(&words, system);
+        }
     }
+
     for action in plan.actions.iter().filter(|action| action.change != Change::Keep) {
         if action.system {
             apply_system(action)?;
@@ -389,13 +407,36 @@ pub fn apply(plan: &Plan, places: &Places, purpose: Purpose) -> Result<Option<Pa
         fs::remove_dir_all(folder).map_err(|error| format!("couldn't remove {}: {error}", folder.display()))?;
     }
 
+    let changed = |system: bool| {
+        plan.actions
+            .iter()
+            .any(|action| action.system == system && action.change != Change::Keep)
+    };
     run(&["systemctl", "--user", "daemon-reload"], false)?;
-    if system_changes {
+    if changed(true) {
         run(&["systemctl", "daemon-reload"], true)?;
-        if purpose == Purpose::Install {
-            run(&["systemctl", "enable", "--now", "corral-web.socket"], true)?;
-            // A web front still running from before picks up its new program on the next visit
-            run(&["systemctl", "try-restart", "corral-web.service"], true)?;
+    }
+    if purpose == Purpose::Install {
+        // The web front's socket only takes new ports when restarted; its service restarts with it
+        let web_changed = |system: bool| {
+            plan.actions.iter().any(|action| {
+                action.system == system
+                    && matches!(action.change, Change::Create | Change::Replace)
+                    && action
+                        .path
+                        .file_name()
+                        .is_some_and(|name| name.to_string_lossy().starts_with("corral-web."))
+            })
+        };
+        for system in [false, true] {
+            if web_changed(system) {
+                let user: &[&'static str] = if system { &[] } else { &["--user"] };
+                let systemctl =
+                    |rest: &[&'static str]| -> Vec<&'static str> { [&["systemctl"][..], user, rest].concat() };
+                let _ = run(&systemctl(&["stop", "corral-web.service"]), system);
+                run(&systemctl(&["enable", "corral-web.socket"]), system)?;
+                run(&systemctl(&["restart", "corral-web.socket"]), system)?;
+            }
         }
     }
     Ok(backed_up.then_some(backups))
