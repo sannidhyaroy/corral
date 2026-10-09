@@ -98,6 +98,12 @@ fn main() -> ExitCode {
         _ => {}
     }
 
+    // Rust ignores SIGPIPE, so `corral models | head` would panic on the closed pipe; commands end quietly instead
+    // SAFETY: setting a signal's disposition before any threads exist
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
+
     let cli = Cli::parse();
     match cli.command.unwrap_or(Command::Status { json: false }) {
         Command::On { with, without } => on(&Config::load(), &with, &without),
