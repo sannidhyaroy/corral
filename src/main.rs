@@ -99,7 +99,7 @@ fn on(config: &Config, with: &[String], without: &[String]) -> ExitCode {
     let stop: Vec<String> = helpers
         .iter()
         .filter(|helper| !armed.iter().any(|a| a.name == helper.name))
-        .flat_map(|helper| [helper.socket_unit(), helper.service_unit()])
+        .flat_map(Helper::units)
         .filter(is_installed)
         .collect();
     if let Err(error) = systemd::start(&start) {
