@@ -6,6 +6,7 @@ pub mod http;
 pub mod install;
 pub mod keys;
 pub mod look;
+pub mod presets;
 pub mod router;
 pub mod status;
 pub mod system;
