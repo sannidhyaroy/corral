@@ -7,7 +7,7 @@
 
 use std::fmt::Write;
 
-use crate::config::Config;
+use crate::config::{Config, NameListen};
 use crate::helpers::{Helper, Kind};
 
 /// Everything the units depend on that differs between machines.
@@ -176,8 +176,14 @@ pub fn web_units(context: &Context) -> Vec<Unit> {
     let gate = config.gate_port();
     let mut doors = listen_lines(gate, config.listen_on_all());
     if config.name().is_some() {
-        let address = config.name_address();
-        let _ = write!(doors, "ListenStream={address}:80\nListenStream={address}:443\n");
+        if config.name_listen() == NameListen::Local {
+            let address = config.name_address();
+            let _ = write!(doors, "ListenStream={address}:80\nListenStream={address}:443\n");
+        } else {
+            // Every address, the name's own included; with `armed`, `corral web` turns other devices away while
+            // Corral is off (a second socket on all addresses can't sit beside one on the name's address)
+            doors.push_str("ListenStream=80\nListenStream=443\n");
+        }
     }
     let description = config.name().map_or_else(
         || format!("the gate (port {gate})"),
@@ -297,5 +303,20 @@ mod tests {
         assert_eq!(quote("/a path/x"), "\"/a path/x\"");
         assert_eq!(quote("{\"a\": 1}"), "\"{\\\"a\\\": 1}\"");
         assert_eq!(quote("100%"), "100%%");
+    }
+
+    #[test]
+    fn the_name_reaches_other_devices_only_when_asked() {
+        let local = Config::parse("name = corral.example");
+        assert!(
+            find(&system_units(&context(&local, &[])), "corral-web.socket").contains("ListenStream=127.0.97.105:443")
+        );
+        for setting in ["armed", "all"] {
+            let open = Config::parse(&format!("name = corral.example\nname_listen = {setting}"));
+            let units = system_units(&context(&open, &[]));
+            let socket = find(&units, "corral-web.socket");
+            assert!(socket.contains("ListenStream=80\nListenStream=443\n"), "{setting}");
+            assert!(!socket.contains("127.0.97.105"), "{setting}");
+        }
     }
 }
