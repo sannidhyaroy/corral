@@ -1,0 +1,116 @@
+//! Corral's settings file, `corral.conf`: one `key = value` per line, `#` starts a comment. When a key appears more
+//! than once, the last one counts.
+
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::{env, fs};
+
+/// Where Corral keeps its settings: `$XDG_CONFIG_HOME/corral`, or `~/.config/corral`.
+pub fn config_dir() -> PathBuf {
+    let base = env::var_os("XDG_CONFIG_HOME")
+        .filter(|dir| !dir.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
+        .unwrap_or_default();
+    base.join("corral")
+}
+
+#[derive(Debug, Default)]
+pub struct Config {
+    values: HashMap<String, String>,
+}
+
+impl Config {
+    /// Reads `corral.conf`. A missing or unreadable file means "all defaults".
+    pub fn load() -> Self {
+        fs::read_to_string(config_dir().join("corral.conf")).map_or_else(|_| Self::default(), |text| Self::parse(&text))
+    }
+
+    pub fn parse(text: &str) -> Self {
+        let values = text
+            .lines()
+            .map(|line| line.split_once('#').map_or(line, |(before, _)| before))
+            .filter_map(|line| line.split_once('='))
+            .map(|(key, value)| (key.trim().to_owned(), value.trim().to_owned()))
+            .filter(|(key, value)| !key.is_empty() && !value.is_empty())
+            .collect();
+        Self { values }
+    }
+
+    pub fn get(&self, key: &str) -> Option<&str> {
+        self.values.get(key).map(String::as_str)
+    }
+
+    /// `yes`/`no` (also `true`/`false`, `on`/`off`, `1`/`0`); anything else gives the default.
+    pub fn flag(&self, key: &str, default: bool) -> bool {
+        match self.get(key).map(str::to_ascii_lowercase).as_deref() {
+            Some("yes" | "true" | "on" | "1") => true,
+            Some("no" | "false" | "off" | "0") => false,
+            _ => default,
+        }
+    }
+
+    pub fn number(&self, key: &str) -> Option<f64> {
+        self.get(key)?.parse().ok()
+    }
+
+    /// A comma-separated list; items may contain spaces.
+    pub fn list(&self, key: &str) -> Vec<String> {
+        self.get(key)
+            .map(|value| {
+                value
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|item| !item.is_empty())
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SAMPLE: &str = "\
+# A comment line
+sweep = no   # a trailing comment
+exclusive = Gemma 4-26b-a4b-256k, Gemma 4-26b-a4b-pantheon ,
+gpu_warn = 22.4
+gpu_warn = 21.0
+broken line without equals
+empty =
+";
+
+    #[test]
+    fn reads_values_and_ignores_comments() {
+        let config = Config::parse(SAMPLE);
+        assert_eq!(config.get("sweep"), Some("no"));
+        assert_eq!(config.get("empty"), None);
+        assert_eq!(config.get("broken line without equals"), None);
+    }
+
+    #[test]
+    fn last_value_wins() {
+        assert_eq!(Config::parse(SAMPLE).number("gpu_warn"), Some(21.0));
+    }
+
+    #[test]
+    fn flags_fall_back_to_the_default() {
+        let config = Config::parse("a = yes\nb = Off\nc = maybe");
+        assert!(config.flag("a", false));
+        assert!(!config.flag("b", true));
+        assert!(config.flag("c", true));
+        assert!(!config.flag("missing", false));
+    }
+
+    #[test]
+    fn lists_keep_spaces_inside_items() {
+        assert_eq!(
+            Config::parse(SAMPLE).list("exclusive"),
+            ["Gemma 4-26b-a4b-256k", "Gemma 4-26b-a4b-pantheon"]
+        );
+        assert!(Config::parse("").list("exclusive").is_empty());
+    }
+}
