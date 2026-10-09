@@ -438,6 +438,21 @@ pub fn apply(plan: &Plan, places: &Places, purpose: Purpose) -> Result<Option<Pa
                 run(&systemctl(&["restart", "corral-web.socket"]), system)?;
             }
         }
+
+        // Daemons still running the previous program switch to the new one now; the router and its model stay
+        let binary = places.bin.join("corral");
+        let binary_changed = plan
+            .actions
+            .iter()
+            .any(|action| action.path == binary && matches!(action.change, Change::Create | Change::Replace));
+        if binary_changed {
+            let _ = run(&["systemctl", "--user", "try-restart", crate::systemd::GUARD], false);
+            if places.system_units.join("corral-web.service").exists() {
+                let _ = run(&["systemctl", "try-restart", "corral-web.service"], true);
+            } else {
+                let _ = run(&["systemctl", "--user", "try-restart", "corral-web.service"], false);
+            }
+        }
     }
     Ok(backed_up.then_some(backups))
 }
