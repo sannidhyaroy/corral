@@ -45,10 +45,12 @@ enum Command {
 }
 
 fn main() -> ExitCode {
-    // The daemons are started by systemd, not typed, so they stay out of help and completions
-    match std::env::args().nth(1).as_deref() {
+    // Run by systemd, not typed, so these stay out of help and completions
+    let args: Vec<String> = std::env::args().collect();
+    match args.get(1).map(String::as_str) {
         Some("guard") => return corral::guard::run(),
         Some("web") => return corral::web::run(),
+        Some("ready") => return ready(&args[2..]),
         _ => {}
     }
 
@@ -165,6 +167,30 @@ fn logs() -> ExitCode {
     // Replaces this process, so Ctrl+C and the exit code are journalctl's own
     let error = journalctl.exec();
     eprintln!("corral: couldn't run journalctl: {error}");
+    ExitCode::FAILURE
+}
+
+/// `corral ready <port> [--connect]`: waits up to a minute until a server on this machine answers its health check
+/// (or, with `--connect`, accepts connections), so systemd reports it started only once it can serve.
+fn ready(args: &[String]) -> ExitCode {
+    let Some(port) = args.first().and_then(|port| port.parse::<u16>().ok()) else {
+        eprintln!("usage: corral ready <port> [--connect]");
+        return ExitCode::FAILURE;
+    };
+    let connect_only = args.iter().any(|arg| arg == "--connect");
+    for _ in 0..120 {
+        let up = if connect_only {
+            std::net::TcpStream::connect(("127.0.0.1", port)).is_ok()
+        } else {
+            corral::http::request(port, "GET", "/health", None, corral::http::SHORT, |_| true)
+                .is_ok_and(|status| status == 200)
+        };
+        if up {
+            return ExitCode::SUCCESS;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+    eprintln!("corral: nothing answered on port {port} within a minute");
     ExitCode::FAILURE
 }
 
