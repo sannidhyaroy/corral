@@ -48,10 +48,7 @@ fn main() -> ExitCode {
     // The daemons are started by systemd, not typed, so they stay out of help and completions
     match std::env::args().nth(1).as_deref() {
         Some("guard") => return corral::guard::run(),
-        Some("web") => {
-            eprintln!("corral web: not implemented yet");
-            return ExitCode::FAILURE;
-        }
+        Some("web") => return corral::web::run(),
         _ => {}
     }
 

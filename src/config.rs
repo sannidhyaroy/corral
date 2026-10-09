@@ -120,6 +120,11 @@ impl Config {
         self.port("router_port", DEFAULT_ROUTER_PORT)
     }
 
+    /// The web front's own HTTPS name (`name`), such as `corral.example`; none unless set.
+    pub fn name(&self) -> Option<&str> {
+        self.get("name")
+    }
+
     /// The guard's limits for GPU memory in bytes: a warning at `gpu_warn`, unloading the model at `gpu_unload`
     /// (both in GiB). Without settings: 90% and 95% of the GPU's `total`.
     pub fn gpu_limits(&self, total: u64) -> GpuLimits {

@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Corral</title>
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #f6f6f4; --surface: #ffffff; --ink: #1b1b1a; --muted: #67665f; --line: #e3e2dc;
+    --track: #ecebe6; --fill: #3d3c38; --warn: #b45309;
+    --coral: #d33e21; --on-coral: #ffffff;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #141413; --surface: #1d1d1b; --ink: #ecebe6; --muted: #9b9a93; --line: #2e2d2a;
+      --track: #2a2926; --fill: #c9c7bf; --warn: #f59e0b;
+      --coral: #f1735a; --on-coral: #1b1b1a;
+    }
+    /* llama.cpp's icon is drawn in near-black; flip it so it shows on the dark page */
+    .brand img { filter: invert(1); }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh; display: grid; place-items: center; padding: 32px 16px;
+    background: var(--bg); color: var(--ink);
+    font: 16px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  main { width: 100%; max-width: 30rem; }
+  .brand { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 0.9rem; margin-bottom: 20px; }
+  .brand img { width: 20px; height: 20px; }
+  h1 { font-size: 1.75rem; line-height: 1.2; margin: 0 0 6px; letter-spacing: -0.01em; }
+  .lede { margin: 0 0 20px; color: var(--muted); }
+  button.gate {
+    font: inherit; font-weight: 600; border: 0; border-radius: 10px; padding: 12px 20px; cursor: pointer;
+    background: var(--coral); color: var(--on-coral); width: 100%;
+  }
+  button.gate:hover { filter: brightness(1.05); }
+  button.gate:focus-visible { outline: 3px solid var(--coral); outline-offset: 3px; }
+  button.gate:disabled { cursor: progress; opacity: 0.75; }
+  .hint { margin: 8px 0 0; font-size: 0.85rem; color: var(--muted); text-align: center; }
+  .hint code { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 0.95em; }
+  .message { margin: 10px 0 0; font-size: 0.9rem; min-height: 1.4em; text-align: center; }
+  .message.error { color: var(--warn); }
+  section { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 16px; margin-top: 20px; }
+  h2 { font-size: 0.8rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); margin: 0 0 12px; }
+  .meter { margin-bottom: 12px; }
+  .meter .row { display: flex; justify-content: space-between; font-size: 0.9rem; margin-bottom: 4px; }
+  .meter .value { font-variant-numeric: tabular-nums; color: var(--muted); }
+  .bar { height: 8px; border-radius: 4px; background: var(--track); overflow: hidden; }
+  .bar span { display: block; height: 100%; width: 0; border-radius: 4px; background: var(--fill); transition: width 0.4s ease; }
+  .bar span.high { background: var(--warn); }
+  .facts { display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: 0.9rem; font-variant-numeric: tabular-nums; }
+  .facts .label { color: var(--muted); }
+  .paused { font-size: 0.85rem; color: var(--muted); margin: 10px 0 0; }
+  .paused button { font: inherit; background: none; border: 0; padding: 0; color: var(--ink); text-decoration: underline; cursor: pointer; }
+  ul.models { list-style: none; margin: 0; padding: 0; }
+  ul.models li { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 6px 0; border-top: 1px solid var(--line); }
+  ul.models li:first-child { border-top: 0; padding-top: 0; }
+  .name { font-weight: 500; margin-right: auto; }
+  .tag { font-size: 0.75rem; padding: 1px 8px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); white-space: nowrap; }
+</style>
+</head>
+<body>
+<main>
+  <div class="brand"><img src="/favicon.svg" alt=""> Corral</div>
+  <h1>The pen is empty</h1>
+  <p class="lede">Corral is off: no model is loaded, and none will start until you open the gate.</p>
+
+  <button class="gate" id="gate" type="button">Open the gate</button>
+  <p class="hint">or run <code>corral on</code> in a terminal</p>
+  <p class="message" id="message" role="status" aria-live="polite"></p>
+
+  <section aria-labelledby="now">
+    <h2 id="now">The ranch</h2>
+    <div class="meter" id="gpu">
+      <div class="row"><span>GPU memory</span><span class="value" id="gpu-text">…</span></div>
+      <div class="bar"><span id="gpu-bar"></span></div>
+    </div>
+    <div class="meter" id="ram">
+      <div class="row"><span>RAM</span><span class="value" id="ram-text">…</span></div>
+      <div class="bar"><span id="ram-bar"></span></div>
+    </div>
+    <div class="facts">
+      <span id="cpu-wrap"><span class="label">CPU</span> <span id="cpu-temp">…</span></span>
+      <span id="gpu-wrap"><span class="label">GPU</span> <span id="gpu-temp">…</span></span>
+      <span id="fan-wrap"><span class="label">Fan</span> <span id="fan">…</span></span>
+    </div>
+    <p class="paused" id="paused" hidden>Paused so Corral's web front can rest. <button type="button" id="resume">Refresh</button></p>
+  </section>
+
+  <section aria-labelledby="pen">
+    <h2 id="pen">In the pen</h2>
+    <ul class="models" id="models"><li>…</li></ul>
+  </section>
+</main>
+<script>
+  // Live numbers come from /corral/status every 3 s, but only while this tab is visible and for 2 minutes at a
+  // time: each request keeps the web front running, and a forgotten tab shouldn't keep it alive.
+  const $ = (id) => document.getElementById(id);
+  const gib = (bytes) => (bytes / 2 ** 30).toFixed(1);
+  const celsius = (milli) => `${Math.round(milli / 1000)} °C`;
+
+  // Readings this machine doesn't offer (no GPU memory info, no fan sensor…) are hidden, not shown as blanks
+  function fact(name, value, text) {
+    $(`${name}-wrap`).hidden = value == null;
+    if (value != null) $(name === "fan" ? "fan" : `${name}-temp`).textContent = text(value);
+  }
+
+  function meter(name, used, total) {
+    $(name).hidden = used == null || !total;
+    if ($(name).hidden) return;
+    const share = used / total;
+    $(`${name}-text`).textContent = `${gib(used)} of ${gib(total)} GiB`;
+    $(`${name}-bar`).style.width = `${Math.min(100, share * 100).toFixed(1)}%`;
+    $(`${name}-bar`).classList.toggle("high", share >= 0.85);
+  }
+
+  function showModels(models) {
+    const list = $("models");
+    list.replaceChildren(...models.map((model) => {
+      const item = document.createElement("li");
+      const name = document.createElement("span");
+      name.className = "name";
+      name.textContent = model.name;
+      item.append(name, ...model.tags.map((tag) => {
+        const badge = document.createElement("span");
+        badge.className = "tag";
+        badge.textContent = tag;
+        return badge;
+      }));
+      return item;
+    }));
+  }
+
+  let modelsShown = false;
+  async function refresh() {
+    try {
+      // Corral armed from a terminal? Then the real app is there: load it.
+      const health = await fetch("/health", { cache: "no-store" });
+      if (health.status !== 503) { location.reload(); return; }
+      const s = await (await fetch("/corral/status", { cache: "no-store" })).json();
+      meter("gpu", s.gpu_used, s.gpu_total);
+      meter("ram", s.ram_used, s.ram_total);
+      fact("cpu", s.cpu_temp, celsius);
+      fact("gpu", s.gpu_temp, celsius);
+      fact("fan", s.fan_rpm, (rpm) => `${rpm.toLocaleString()} rpm`);
+      if (!modelsShown) { showModels(s.models); modelsShown = true; }
+    } catch (e) {}
+  }
+
+  let timer = null, started = 0;
+  function start() {
+    $("paused").hidden = true;
+    started = Date.now();
+    refresh();
+    clearInterval(timer);
+    timer = setInterval(() => {
+      if (Date.now() - started > 120000) { clearInterval(timer); $("paused").hidden = false; return; }
+      if (!document.hidden) refresh();
+    }, 3000);
+  }
+  $("resume").addEventListener("click", start);
+  start();
+
+  // Open the gate: arm Corral, then wait for the router to answer and load the app
+  $("gate").addEventListener("click", async () => {
+    const gate = $("gate"), message = $("message");
+    gate.disabled = true;
+    gate.textContent = "Opening the gate…";
+    message.className = "message";
+    message.textContent = "";
+    try {
+      const r = await fetch("/corral/arm", { method: "POST", headers: { "X-Corral": "arm" } });
+      if (!r.ok) throw new Error(await r.text() || `HTTP ${r.status}`);
+      message.textContent = "Gate open. Starting the router…";
+      for (let i = 0; i < 40; i++) {
+        await new Promise((done) => setTimeout(done, 500));
+        const health = await fetch("/health", { cache: "no-store" }).catch(() => null);
+        if (health && health.status !== 503) { location.reload(); return; }
+      }
+      throw new Error("The router didn't answer within 20 seconds. Try corral status in a terminal.");
+    } catch (e) {
+      message.className = "message error";
+      message.textContent = e.message;
+      gate.disabled = false;
+      gate.textContent = "Open the gate";
+    }
+  });
+</script>
+</body>
+</html>
