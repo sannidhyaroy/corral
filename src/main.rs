@@ -46,9 +46,13 @@ enum Command {
 
 fn main() -> ExitCode {
     // The daemons are started by systemd, not typed, so they stay out of help and completions
-    if let Some("web" | "guard") = std::env::args().nth(1).as_deref() {
-        eprintln!("corral daemons: not implemented yet");
-        return ExitCode::FAILURE;
+    match std::env::args().nth(1).as_deref() {
+        Some("guard") => return corral::guard::run(),
+        Some("web") => {
+            eprintln!("corral web: not implemented yet");
+            return ExitCode::FAILURE;
+        }
+        _ => {}
     }
 
     let cli = Cli::parse();

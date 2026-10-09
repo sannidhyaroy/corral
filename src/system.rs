@@ -94,6 +94,11 @@ fn entries(dir: &Path, prefix: &str) -> Vec<PathBuf> {
     found
 }
 
+/// Only the GPU's memory, for frequent checks.
+pub fn read_gpu_memory() -> Option<GpuMemory> {
+    gpu_memory(Path::new("/"))
+}
+
 /// The first GPU that reports its memory.
 fn gpu_memory(root: &Path) -> Option<GpuMemory> {
     entries(&root.join("sys/class/drm"), "card")

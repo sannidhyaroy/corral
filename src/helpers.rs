@@ -43,6 +43,16 @@ impl Helper {
         format!("corral-{}.service", self.name)
     }
 
+    /// The process between the socket and the server, which starts the server on the first request.
+    pub fn proxy_unit(&self) -> String {
+        format!("corral-{}-proxy.service", self.name)
+    }
+
+    /// All of this helper's units, from the socket inward.
+    pub fn units(&self) -> [String; 3] {
+        [self.socket_unit(), self.proxy_unit(), self.service_unit()]
+    }
+
     /// The command line that starts this helper's server on its internal port.
     pub fn command_line(&self, home: &str) -> Vec<String> {
         match &self.kind {
