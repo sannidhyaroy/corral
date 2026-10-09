@@ -22,6 +22,7 @@
 - [Security](#security)
 - [Limitations](#limitations)
 - [FAQ](#faq)
+- [Contributing](#contributing)
 - [Get in touch](#get-in-touch)
 - [License](#license)
 
@@ -178,6 +179,24 @@ It's where you keep your llamas.
 ### Why port 24937?
 
 Write 24937 in hexadecimal and read it as two bytes: `0x61 0x69`. In ASCII, that's `ai`. The same trick gives the custom name its address, `127.0.97.105`, which reads `127.0.'a'.'i'`.
+
+---
+
+## Contributing
+
+- Install [Rust](https://rustup.rs) and the [uv](https://docs.astral.sh/uv/) project manager by [Astral](https://astral.sh/).
+- Clone this repo, then set up the git hooks once:
+
+  ```bash
+  uv run prek install
+  ```
+
+  This installs [prek](https://github.com/j178/prek), pinned in `uv.lock`, inside the project rather than globally, and wires it into `.git/hooks/`. Before each commit, `cargo fmt` and `cargo clippy` check exactly what you staged, and the commit message is checked too.
+
+- Commits follow [Conventional Commits](https://www.conventionalcommits.org/) with a scope, like `feat(cli): add shell completions`, and titles of at most 72 characters. Fixes to commits that aren't pushed yet go in as `git commit --fixup=<commit>`, so they fold in with `git rebase -i --autosquash`.
+
+> [!NOTE]
+> Hooks live in `.git/`, which is never cloned, so `uv run prek install` is needed once in every clone.
 
 ---
 
