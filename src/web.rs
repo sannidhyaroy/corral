@@ -16,9 +16,11 @@ mod access;
 mod panel;
 mod session;
 
+use std::collections::HashMap;
 use std::io::Read;
 use std::net::{IpAddr, SocketAddr};
 use std::os::fd::FromRawFd;
+use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -38,6 +40,8 @@ use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer};
 
 use crate::config::{AddressRange, Config, NameListen, config_dir};
 use crate::keys::Keys;
+use crate::presets;
+use crate::thinking::{self, Abilities};
 
 use access::Requester;
 
@@ -422,6 +426,58 @@ fn refused(status: StatusCode) -> Response<Body> {
     response
 }
 
+/// Each model file's thinking abilities, read once: a model file doesn't change its template.
+static ABILITIES: Mutex<Option<HashMap<PathBuf, Abilities>>> = Mutex::new(None);
+
+/// The thinking abilities of the preset an app asked for, by name or alias.
+fn abilities_of(model: &str) -> Option<Abilities> {
+    let config = Config::load();
+    let preset = presets::load().into_iter().find(|preset| preset.is(model))?;
+    // A setting answers without the file, and may change at any time
+    if config.get(&format!("thinking.{}", preset.id)).is_some() {
+        return preset.abilities(&config).ok();
+    }
+    let file = preset.model.clone()?;
+    let mut cache = ABILITIES.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(abilities) = cache.get_or_insert_with(HashMap::new).get(&file) {
+        return Some(*abilities);
+    }
+    let abilities = preset.abilities(&config).ok()?;
+    cache.get_or_insert_with(HashMap::new).insert(file, abilities);
+    Some(abilities)
+}
+
+/// Chat requests with the standard `reasoning_effort` are rewritten into what the requested model understands; every
+/// other request passes through untouched, streaming included.
+async fn translate_thinking(req: Request<Incoming>) -> Result<Request<Body>, hyper::Error> {
+    let is_chat =
+        req.method() == hyper::Method::POST && matches!(req.uri().path(), "/v1/chat/completions" | "/chat/completions");
+    if !is_chat {
+        return Ok(req.map(BodyExt::boxed));
+    }
+    let (mut parts, body) = req.into_parts();
+    let bytes = body.collect().await?.to_bytes();
+    let mut rewritten = None;
+    if let Ok(mut request) = serde_json::from_slice::<serde_json::Value>(&bytes)
+        && request.get("reasoning_effort").is_some()
+        && let Some(model) = request.get("model").and_then(|model| model.as_str()).map(str::to_owned)
+    {
+        let lookup = model.clone();
+        // Reading models.ini and a model file's header is file work, kept off the request thread
+        let abilities = tokio::task::spawn_blocking(move || abilities_of(&lookup))
+            .await
+            .ok()
+            .flatten();
+        if let Some(done) = abilities.and_then(|abilities| thinking::translate(&mut request, abilities)) {
+            println!("thinking: {model}: {done}");
+            rewritten = serde_json::to_vec(&request).ok();
+        }
+    }
+    let body = rewritten.map_or(bytes, Bytes::from);
+    parts.headers.insert(CONTENT_LENGTH, body.len().into());
+    Ok(Request::from_parts(parts, full(body)))
+}
+
 /// The gate and the HTTPS door: Corral's own endpoints, then the router, started on demand.
 async fn forward(mut req: Request<Incoming>, peer: IpAddr) -> Result<Response<Body>, hyper::Error> {
     let busy = Busy::start();
@@ -482,6 +538,7 @@ async fn forward(mut req: Request<Incoming>, peer: IpAddr) -> Result<Response<Bo
     if let Some(path) = req.uri().path_and_query().cloned() {
         *req.uri_mut() = path.as_str().parse().expect("a path is a valid URI");
     }
+    let req = translate_thinking(req).await?;
     let response = sender.send_request(req).await?;
 
     // Only the page and the manifest carry the app's name; everything else streams through untouched
