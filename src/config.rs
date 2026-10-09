@@ -20,6 +20,17 @@ pub const DEFAULT_GATE_PORT: u16 = 24937;
 /// llama.cpp's router, reachable only from this machine.
 pub const DEFAULT_ROUTER_PORT: u16 = 18080;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GpuLimits {
+    pub warn: u64,
+    pub unload: u64,
+}
+
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // positive GiB values, far below u64::MAX
+fn gib_to_bytes(gib: f64) -> u64 {
+    (gib * f64::from(1 << 30)) as u64
+}
+
 #[derive(Debug, Default)]
 pub struct Config {
     values: HashMap<String, String>,
@@ -83,6 +94,20 @@ impl Config {
         self.port("router_port", DEFAULT_ROUTER_PORT)
     }
 
+    /// The guard's limits for GPU memory in bytes: a warning at `gpu_warn`, unloading the model at `gpu_unload`
+    /// (both in GiB). Without settings: 90% and 95% of the GPU's `total`.
+    pub fn gpu_limits(&self, total: u64) -> GpuLimits {
+        let setting = |key: &str, default_percent: u64| {
+            self.number(key)
+                .filter(|gib| *gib > 0.0)
+                .map_or(total / 100 * default_percent, gib_to_bytes)
+        };
+        GpuLimits {
+            warn: setting("gpu_warn", 90),
+            unload: setting("gpu_unload", 95),
+        }
+    }
+
     fn port(&self, key: &str, default: u16) -> u16 {
         self.get(key)
             .and_then(|value| value.parse().ok())
@@ -142,5 +167,26 @@ empty =
         assert_eq!(config.router_port(), 19090);
         assert_eq!(config.gate_port(), DEFAULT_GATE_PORT);
         assert_eq!(Config::parse("gate_port = 70000").gate_port(), DEFAULT_GATE_PORT);
+    }
+
+    #[test]
+    fn gpu_limits_from_settings_or_percentages() {
+        const GIB: u64 = 1 << 30;
+        let limits = Config::parse("gpu_warn = 22.5\ngpu_unload = 23").gpu_limits(24 * GIB);
+        assert_eq!(
+            limits,
+            GpuLimits {
+                warn: 22 * GIB + GIB / 2,
+                unload: 23 * GIB
+            }
+        );
+        let defaults = Config::parse("").gpu_limits(100 * GIB);
+        assert_eq!(
+            defaults,
+            GpuLimits {
+                warn: 90 * GIB,
+                unload: 95 * GIB
+            }
+        );
     }
 }
