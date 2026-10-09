@@ -1,0 +1,46 @@
+# Git hooks, run through prek (https://github.com/j178/prek), a dev dependency pinned in uv.lock.
+# Once per clone: `uv run prek install`.
+#
+# The Rust checks are local hooks: they run the project's own toolchain and download nothing. prek stashes unstaged
+# changes first, so they check exactly what is being committed.
+
+default_install_hook_types:
+  - pre-commit
+  - commit-msg
+
+repos:
+  - repo: local
+    hooks:
+      - id: cargo-fmt
+        name: cargo fmt
+        entry: cargo fmt --check
+        language: system
+        stages: [pre-commit]
+        files: \.rs$|^rustfmt\.toml$
+        pass_filenames: false
+
+      - id: cargo-clippy
+        name: cargo clippy
+        entry: cargo clippy --all-targets -- -D warnings
+        language: system
+        stages: [pre-commit]
+        files: \.rs$|^Cargo\.(toml|lock)$
+        pass_filenames: false
+
+      # GitHub truncates longer titles. fixup!, amend! and squash! commits are folded away by autosquash.
+      - id: commit-title-length
+        name: commit title at most 72 characters
+        language: system
+        stages: [commit-msg]
+        entry: >-
+          sh -c 'title=$(head -n 1 "$1");
+          case "$title" in fixup!*|amend!*|squash!*) exit 0 ;; esac;
+          [ "${#title}" -le 72 ] || { echo "Commit title has ${#title} characters; keep it at 72 or fewer."; exit 1; }' --
+
+  - repo: https://github.com/compilerla/conventional-pre-commit
+    rev: v4.4.0
+    hooks:
+      # --force-scope rejects `feat: add x` in favour of `feat(cli): add x`.
+      - id: conventional-pre-commit
+        stages: [commit-msg]
+        args: [--force-scope]
