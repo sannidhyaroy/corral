@@ -53,6 +53,16 @@ fn gib_to_bytes(gib: f64) -> u64 {
     (gib * f64::from(1 << 30)) as u64
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NameListen {
+    /// Only this machine, on the name's own address.
+    Local,
+    /// Every address; other devices are let in only while Corral is armed.
+    Armed,
+    /// Every address, always.
+    All,
+}
+
 /// An address or a range in CIDR notation, such as `100.64.0.0/10` or `fd7a:115c:a1e0::/48`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AddressRange {
@@ -178,9 +188,19 @@ impl Config {
     }
 
     /// Whether the gate listens on every address (`listen = all`) instead of only this machine's (`local`, the
-    /// default). Without API keys, every device on those networks can use the models and the router's tools.
+    /// default). Other devices then need an API key.
     pub fn listen_on_all(&self) -> bool {
         self.get("listen") == Some("all")
+    }
+
+    /// Who reaches the custom name's ports 80 and 443 (`name_listen`): only this machine (`local`, the default),
+    /// other devices too while Corral is armed (`armed`), or always (`all`).
+    pub fn name_listen(&self) -> NameListen {
+        match self.get("name_listen") {
+            Some("armed") => NameListen::Armed,
+            Some("all") => NameListen::All,
+            _ => NameListen::Local,
+        }
     }
 
     /// How many models the router keeps loaded at once (`models_max`, default 1).
@@ -317,5 +337,13 @@ empty =
         assert!(!trusted("192.168.1.8"));
         assert!(trusted("fd7a:115c:a1e0::1234"));
         assert!(Config::parse("trusted = 0.0.0.0/0").trusted()[0].contains("8.8.8.8".parse().unwrap()));
+    }
+
+    #[test]
+    fn who_reaches_the_custom_name() {
+        assert_eq!(Config::parse("").name_listen(), NameListen::Local);
+        assert_eq!(Config::parse("name_listen = armed").name_listen(), NameListen::Armed);
+        assert_eq!(Config::parse("name_listen = all").name_listen(), NameListen::All);
+        assert_eq!(Config::parse("name_listen = everyone").name_listen(), NameListen::Local);
     }
 }
