@@ -1,4 +1,4 @@
-use std::io;
+use std::io::{self, Write};
 use std::os::unix::process::CommandExt;
 use std::process::ExitCode;
 
@@ -35,8 +35,11 @@ enum Command {
     #[command(visible_alias = "st")]
     Status {
         /// Print the status as JSON, for scripts and status bars
-        #[arg(long)]
+        #[arg(long, conflicts_with = "watch")]
         json: bool,
+        /// Keep the status on screen, redrawn every 2 seconds, until q or Ctrl+C
+        #[arg(long, short)]
+        watch: bool,
     },
     /// Follow the servers' logs
     #[command(visible_alias = "lg")]
@@ -105,10 +108,13 @@ fn main() -> ExitCode {
     }
 
     let cli = Cli::parse();
-    match cli.command.unwrap_or(Command::Status { json: false }) {
+    match cli.command.unwrap_or(Command::Status {
+        json: false,
+        watch: false,
+    }) {
         Command::On { with, without } => on(&Config::load(), &with, &without),
         Command::Off => off(),
-        Command::Status { json } => status(json),
+        Command::Status { json, watch } => status(json, watch),
         Command::Logs => logs(),
         Command::Models => models(),
         Command::Completions { shell } => {
@@ -445,14 +451,101 @@ fn ready(args: &[String]) -> ExitCode {
     ExitCode::FAILURE
 }
 
-fn status(json: bool) -> ExitCode {
-    let status = Status::gather(&Config::load());
+fn status(json: bool, watch: bool) -> ExitCode {
     if json {
-        println!("{:#}", status.to_json());
-    } else if corral::look::fancy() {
-        print!("{}", status.render_fancy());
-    } else {
-        print!("{}", status.render_plain());
+        println!("{:#}", Status::gather(&Config::load()).to_json());
+        return ExitCode::SUCCESS;
     }
-    ExitCode::SUCCESS
+    if !watch {
+        print!("{}", rendered_status());
+        return ExitCode::SUCCESS;
+    }
+    // Redraw in place until q or Ctrl+C: clear the screen and start from the top each time, so the page doesn't
+    // scroll. The settings are read again on every round, so edits show up without restarting the watch. The last
+    // page stays on screen after quitting.
+    let keys = KeyReader::new();
+    let mut out = io::stdout();
+    loop {
+        let page = rendered_status();
+        let _ = write!(
+            out,
+            "\x1b[H\x1b[2J{page}\nRedrawn every 2 seconds; q or Ctrl+C to stop.\n"
+        );
+        let _ = out.flush();
+        if keys.quit_within(std::time::Duration::from_secs(2)) {
+            return ExitCode::SUCCESS;
+        }
+    }
+}
+
+/// Keys typed during `corral status --watch`, read one at a time without Enter. The terminal's previous mode comes
+/// back when this is dropped; Ctrl+C is read as a key rather than a signal, so the program always gets to restore
+/// it. Without a terminal on stdin (a pipe, a script), nothing changes and the watch only waits.
+struct KeyReader {
+    saved: Option<libc::termios>,
+}
+
+impl KeyReader {
+    fn new() -> Self {
+        // SAFETY: isatty, tcgetattr and tcsetattr on stdin, with a termios that tcgetattr fills in before use
+        unsafe {
+            if libc::isatty(libc::STDIN_FILENO) != 1 {
+                return Self { saved: None };
+            }
+            let mut mode: libc::termios = std::mem::zeroed();
+            if libc::tcgetattr(libc::STDIN_FILENO, &raw mut mode) != 0 {
+                return Self { saved: None };
+            }
+            let saved = mode;
+            mode.c_lflag &= !(libc::ICANON | libc::ECHO | libc::ISIG);
+            mode.c_cc[libc::VMIN] = 0;
+            mode.c_cc[libc::VTIME] = 0;
+            if libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &raw const mode) != 0 {
+                return Self { saved: None };
+            }
+            Self { saved: Some(saved) }
+        }
+    }
+
+    /// Waits up to `timeout` for a key: true for q or Ctrl+C. Any other key ends the wait early (an immediate redraw).
+    fn quit_within(&self, timeout: std::time::Duration) -> bool {
+        if self.saved.is_none() {
+            std::thread::sleep(timeout);
+            return false;
+        }
+        let mut stdin = libc::pollfd {
+            fd: libc::STDIN_FILENO,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let millis = i32::try_from(timeout.as_millis()).unwrap_or(i32::MAX);
+        // SAFETY: one valid pollfd for stdin
+        if unsafe { libc::poll(&raw mut stdin, 1, millis) } <= 0 {
+            return false;
+        }
+        let mut key = 0u8;
+        // SAFETY: reads at most one byte into a local
+        let read = unsafe { libc::read(libc::STDIN_FILENO, (&raw mut key).cast(), 1) };
+        read == 1 && matches!(key, b'q' | b'Q' | 3)
+    }
+}
+
+impl Drop for KeyReader {
+    fn drop(&mut self) {
+        if let Some(saved) = self.saved {
+            // SAFETY: restores the mode tcgetattr saved for stdin
+            unsafe {
+                libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &raw const saved);
+            }
+        }
+    }
+}
+
+fn rendered_status() -> String {
+    let status = Status::gather(&Config::load());
+    if corral::look::fancy() {
+        status.render_fancy()
+    } else {
+        status.render_plain()
+    }
 }
