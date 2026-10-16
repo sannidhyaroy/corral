@@ -71,7 +71,7 @@
 - [x] Unloads the router's model when a helper that needs the whole GPU starts
 
 ### Command line
-- [x] `corral status`: a llama whose face tells you Corral's state, bars for GPU memory and RAM, temperatures and power; plain text in pipes, `--json` for scripts
+- [x] `corral status`: a llama whose face tells you Corral's state, bars for GPU memory and RAM, temperatures and power; plain text in pipes, `--json` for scripts, `--watch` to keep it live on screen
 - [x] Shell completions for bash, zsh, fish, elvish and PowerShell
 - [x] `corral install` and `corral uninstall`, including upgrades and backups, with nothing hardcoded for one machine
 - [ ] `corral pull`: download GGUFs from Hugging Face with pause, resume and retry, straight into a preset
@@ -157,6 +157,7 @@ Every request passes one gate, `corral web`, which decides who may do what befor
 | `corral off` | Disarm: close the gate and stop everything, waiting until it has really stopped |
 | `corral status`, `corral st`, or just `corral` | Armed or not, what is loaded, helpers, GPU memory, RAM, temperatures and power |
 | `corral status --json` | The same, for scripts and status bars |
+| `corral status --watch`, `corral st -w` | The same, redrawn in place every 2 seconds until you press `q` or Ctrl+C |
 | `corral logs`, `corral lg` | Follow the logs of every Corral unit |
 | `corral models` | List the presets, their names in apps, and how each one thinks |
 | `corral install`, `--dry-run` | Install or upgrade; with `--dry-run`, only show what would change |
