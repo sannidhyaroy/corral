@@ -1,5 +1,5 @@
 <div align="center">
-  <h1 style="font-weight: 700; font-size: 4em; margin: 0; padding-top: 0;">Corral</h1>
+  <h1><img src="assets/brand/banner.svg" alt="Corral" width="640"></h1>
   <p><i>A home on the range, where the llamas can play.</i></p>
   <div style="margin-bottom: 1em">
   <a href="https://github.com/sannidhyaroy/corral/blob/main/LICENSE"><img src="https://img.shields.io/github/license/sannidhyaroy/corral.svg?color=C19A6B&style=flat-square" alt="AGPL Licensed"></a>
@@ -336,3 +336,9 @@ Corral serves your models through [llama.cpp](https://github.com/ggml-org/llama.
 ## License
 
 Corral is licensed under the [GNU Affero General Public License v3.0](https://github.com/sannidhyaroy/corral/blob/main/LICENSE).
+
+<div align="center">
+  <br>
+  <img src="assets/brand/mascot-tile.svg" alt="Corral's llama" width="120">
+  <p><i>Happy herding.</i></p>
+</div>
